@@ -20,18 +20,15 @@ def deploy_challenge(state: ArchitectState) -> ArchitectState:
     actual = state["actual_output"]
 
     challenge_run_path = os.path.join(clone_path, "challenge_run.py")
-    content = f"""\
-import sys
-import os
-
-# Make the repo root importable
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from {module_path} import {func}
-
-result = {func}{args}
-print(f"EXPECTED: {expected} | ACTUAL: {{result}}")
-"""
+    content = (
+        "import sys\nimport os\n\n"
+        "# Make the repo root importable\n"
+        "sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\n\n"
+        f"from {module_path} import {func}\n\n"
+        f"_expected = {repr(expected)}\n"
+        f"result = {func}{args}\n"
+        'print(f"EXPECTED: {_expected} | ACTUAL: {result}")\n'
+    )
     with open(challenge_run_path, "w", encoding="utf-8") as f:
         f.write(content)
 

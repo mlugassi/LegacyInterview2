@@ -6,11 +6,14 @@ _LEVEL_NAMES = {1: "Level 1 — Messy Code", 2: "Level 2 — Spaghetti Logic", 3
 
 _LEVEL_TIPS = {
     1: "The code has been obfuscated with meaningless variable names and misleading comments. "
-       "Focus on understanding what the function is *supposed* to return, then trace the logic carefully.",
+       "The bug may not be inside `{func}` itself — it could be in a helper function that `{func}` calls. "
+       "Trace the full call chain carefully before drawing conclusions.",
     2: "Watch out for nested conditions and variables that look global. "
+       "The bug may not be inside `{func}` itself — check every function it delegates to. "
        "Trace every branch of the logic before concluding where the error is.",
     3: "The bug is a numeric constant (a 'magic number'). "
-       "Do NOT try to understand every detail of the formula — focus on identifying which number is wrong "
+       "It may not be inside `{func}` itself — it could be in a helper it calls. "
+       "Do NOT try to understand every detail of the formula — focus on which number is wrong "
        "by comparing the actual output to the expected output.",
 }
 
@@ -23,7 +26,7 @@ def create_readme(state: ArchitectState) -> ArchitectState:
     actual = state["actual_output"]
     target_rel = os.path.relpath(state["target_file"], state["clone_path"])
     level_name = _LEVEL_NAMES.get(level, f"Level {level}")
-    tip = _LEVEL_TIPS.get(level, "")
+    tip = _LEVEL_TIPS.get(level, "").format(func=func)
 
     readme_path = os.path.join(state["clone_path"], "STUDENT_README.md")
     content = f"""\
