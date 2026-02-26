@@ -1,5 +1,6 @@
 import ast
 import json
+import random
 import textwrap
 
 from langchain_openai import ChatOpenAI
@@ -25,11 +26,23 @@ STEP 2 — Inject a FUNCTIONAL bug (the code runs but does the wrong thing):
   You may make 1–3 small coordinated changes to produce the behavioral failure.
   The bug must make the function return a WRONG RESULT for a clear, representable test case.
 
-STEP 3 — Obfuscate: rename every internal local variable to meaningless names
+STEP 3 — Obfuscate variable names: rename every internal local variable to meaningless names
   (var1, temp_x, result_buf, d_ptr, etc.).
   Do NOT rename the function itself, its parameters, or any imported names.
 
-STEP 4 — Add 1–2 misleading inline comments near the bug site that describe
+STEP 4 — Structural obfuscation (make the code harder to read without breaking it):
+  Apply 2–3 of the following techniques to parts of the function NOT involved in the bug:
+    * Split a simple expression into multiple unnecessary intermediate steps
+      e.g.: `return x * 2 + 1` → `_t1 = x * 2; _t2 = _t1 + 1; return _t2`
+    * Replace a readable `for` loop with an equivalent `while` loop (or vice versa)
+    * Add an unreachable / dead-code branch that looks plausible
+      e.g.: `if var1 is None: return var1` before a line where var1 is never None
+    * Inline a trivial helper expression using a redundant boolean cast or identity op
+      e.g.: `bool(flag_a) == True` instead of just `flag_a`
+    * Use a list/dict construction in an unnecessarily roundabout way
+  These changes must NOT affect the observable output — they only reduce readability.
+
+STEP 5 — Add 1–2 misleading inline comments near the bug site that describe
   what the code SHOULD be doing, while it is actually doing the wrong thing.
 """,
     2: """
@@ -47,10 +60,19 @@ STEP 2 — Inject a FUNCTIONAL bug inside a branch or loop:
     * A guard condition inverted so the default path handles what the special path should
   You may make 1–3 coordinated changes. The code must still run without errors.
 
-STEP 3 — Obfuscate: rename every internal local variable (flag_a, temp_x, ptr_b, etc.).
+STEP 3 — Obfuscate variable names: rename every internal local variable (flag_a, temp_x, ptr_b, etc.).
   Do NOT rename the function name, parameters, or imported names.
 
-STEP 4 — Add 1–2 misleading inline comments near the bug that accurately describe
+STEP 4 — Structural obfuscation (make the code harder to read without breaking it):
+  Apply 2–3 of the following to parts NOT involved in the bug:
+    * Split a simple expression into multiple unnecessary intermediate steps
+    * Replace a `for` loop with a `while` loop (or vice versa)
+    * Add a plausible-looking but unreachable dead-code branch
+    * Use identity/tautology expressions: `bool(flag_a) == True`, `x + 0`, etc.
+    * Construct a list or dict in a roundabout way
+  These must NOT change the observable output.
+
+STEP 5 — Add 1–2 misleading inline comments near the bug that accurately describe
   the INTENDED behavior, making the student read "correct" documentation next to wrong code.
 """,
     3: """
@@ -71,10 +93,18 @@ STEP 2 — Inject a FUNCTIONAL numeric bug:
     * Change a threshold constant that controls branching
   You may make 1–3 changes. The code must still run without errors.
 
-STEP 3 — Obfuscate: rename every internal local variable (coeff_a, magic_val, var1, etc.).
+STEP 3 — Obfuscate variable names: rename every internal local variable (coeff_a, magic_val, var1, etc.).
   Do NOT rename the function name, parameters, or imported names.
 
-STEP 4 — Add 1–2 misleading inline comments near the corrupted constants
+STEP 4 — Structural obfuscation (make the code harder to read without breaking it):
+  Apply 2–3 of the following to parts NOT involved in the bug:
+    * Split a simple computation into multiple unnecessary intermediate variables
+    * Replace a `for` loop with a `while` loop (or vice versa)
+    * Add a plausible-looking but unreachable dead-code branch
+    * Use identity expressions or redundant casts that don't affect output
+  These must NOT change the observable output.
+
+STEP 5 — Add 1–2 misleading inline comments near the corrupted constants
   that describe the CORRECT formula, while the code implements the wrong one.
 """,
 }
@@ -121,10 +151,9 @@ def _extract_function_source(source: str, func_name: str) -> tuple[str, int, int
 
 
 def _pick_best_function(source: str) -> str:
-    """Return the best MODULE-LEVEL function that works with primitive types."""
+    """Pick randomly from the top-3 MODULE-LEVEL functions that work with primitive types."""
     tree = ast.parse(source)
-    best_name = ""
-    best_score = -1
+    scored: list[tuple[int, str]] = []
 
     for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -135,8 +164,6 @@ def _pick_best_function(source: str) -> str:
             continue
 
         score = 0
-
-        # Reward numeric/string/list logic — these produce testable primitive outputs
         for child in ast.walk(node):
             if isinstance(child, ast.Constant) and isinstance(child.value, (int, float, str)):
                 score += 2
@@ -152,19 +179,20 @@ def _pick_best_function(source: str) -> str:
                 score += 3
             if isinstance(child, ast.Compare):
                 score += 1
-
-        # Penalise functions that call unknown callables (likely custom class methods)
-        for child in ast.walk(node):
             if isinstance(child, ast.Attribute):
-                score -= 1   # obj.method() suggests class usage
+                score -= 1  # obj.method() suggests class usage
 
-        if score > best_score:
-            best_score = score
-            best_name = node.name
+        if score > 0:
+            scored.append((score, node.name))
 
-    if not best_name:
+    if not scored:
         raise ValueError("No suitable public module-level function found in the target file.")
-    return best_name
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top_n = scored[:3]
+    _, chosen = random.choice(top_n)
+    print(f"[saboteur] Function candidates: {[n for _, n in top_n]} → chose '{chosen}'")
+    return chosen
 
 
 def _parse_response(raw: str) -> dict:
