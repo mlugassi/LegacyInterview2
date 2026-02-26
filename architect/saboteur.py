@@ -99,7 +99,10 @@ Critical rules:
 - Preserve the EXACT original indentation level of the function (copy it from the input).
 - Do NOT modify any docstrings or string literals that already exist in the function.
   You may only ADD new misleading comments on new lines inside the function body.
-- expected_output and actual_output must differ.
+- test_args MUST use only primitive Python literals: int, float, str, list, tuple, dict.
+  Example: (10, 3) or ([1, 2, 3],) or ("hello world",) — NOT custom class instances.
+- expected_output and actual_output must be primitive Python literals too (int, float, str, list…).
+  They must differ.
 - Do NOT include any text outside the JSON object.
 """
 
@@ -118,12 +121,11 @@ def _extract_function_source(source: str, func_name: str) -> tuple[str, int, int
 
 
 def _pick_best_function(source: str) -> str:
-    """Return the name of the best MODULE-LEVEL function (not a class method)."""
+    """Return the best MODULE-LEVEL function that works with primitive types."""
     tree = ast.parse(source)
     best_name = ""
     best_score = -1
 
-    # Only iterate direct children of the module — excludes class methods
     for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -131,8 +133,13 @@ def _pick_best_function(source: str) -> str:
             continue
         if node.end_lineno - node.lineno < 5:
             continue
+
         score = 0
+
+        # Reward numeric/string/list logic — these produce testable primitive outputs
         for child in ast.walk(node):
+            if isinstance(child, ast.Constant) and isinstance(child.value, (int, float, str)):
+                score += 2
             if isinstance(child, (ast.For, ast.While)):
                 score += 3
             if isinstance(child, ast.If):
@@ -140,7 +147,17 @@ def _pick_best_function(source: str) -> str:
             if isinstance(child, ast.Return):
                 score += 2
             if isinstance(child, ast.BinOp):
+                score += 2
+            if isinstance(child, ast.ListComp):
+                score += 3
+            if isinstance(child, ast.Compare):
                 score += 1
+
+        # Penalise functions that call unknown callables (likely custom class methods)
+        for child in ast.walk(node):
+            if isinstance(child, ast.Attribute):
+                score -= 1   # obj.method() suggests class usage
+
         if score > best_score:
             best_score = score
             best_name = node.name
