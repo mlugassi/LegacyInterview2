@@ -209,6 +209,26 @@ def _parse_response(raw: str) -> dict:
     return json.loads(raw)
 
 
+def _try_exec(full_source: str, func_name: str, test_args_str: str) -> tuple[bool, str]:
+    """
+    Execute the full file source in an isolated namespace, call func_name(*args),
+    and return (success, repr_of_result).  Falls back to (False, "") on any error.
+    """
+    namespace: dict = {}
+    try:
+        exec(compile(full_source, "<exec>", "exec"), namespace)  # runs all imports + defs
+        func = namespace.get(func_name)
+        if func is None:
+            return False, ""
+        args = eval(test_args_str, {"__builtins__": __builtins__})
+        if not isinstance(args, tuple):
+            args = (args,)
+        result = func(*args)
+        return True, repr(result)
+    except Exception as e:
+        return False, f"ERROR:{type(e).__name__}: {e}"
+
+
 def sabotage(state: ArchitectState) -> ArchitectState:
     level = state["difficulty_level"]
     instructions = _LEVEL_INSTRUCTIONS.get(level, _LEVEL_INSTRUCTIONS[1])
@@ -261,17 +281,32 @@ def sabotage(state: ArchitectState) -> ArchitectState:
             print(f"[saboteur] GPT renamed function on attempt {attempt} — retrying")
             continue
 
-        # Verify the bug actually produces a different result
-        if data["expected_output"].strip() == data["actual_output"].strip():
-            print(f"[saboteur] expected == actual on attempt {attempt} — retrying")
-            continue
+        test_args = data["test_args"]
+
+        # Actually run both versions to verify the bug is real
+        orig_ok, true_expected = _try_exec(source, func_name, test_args)
+        sabot_ok, true_actual  = _try_exec(new_source, func_name, test_args)
+
+        if orig_ok and sabot_ok:
+            if true_expected == true_actual:
+                print(f"[saboteur] Execution check: outputs identical ({true_expected}) — retrying")
+                continue
+            print(f"[saboteur] Verified:  EXPECTED={true_expected}  ACTUAL={true_actual}")
+        else:
+            # exec failed (likely intra-package imports); fall back to GPT's claims
+            print(f"[saboteur] exec fallback — orig_ok={orig_ok}, sabot_ok={sabot_ok}")
+            true_expected = data["expected_output"]
+            true_actual   = data["actual_output"]
+            if true_expected.strip() == true_actual.strip():
+                print(f"[saboteur] GPT fallback also identical — retrying")
+                continue
 
         # Success
         state["sabotaged_code"] = new_source
         state["function_name"] = func_name
-        state["test_args"] = data["test_args"]
-        state["expected_output"] = data["expected_output"]
-        state["actual_output"] = data["actual_output"]
+        state["test_args"] = test_args
+        state["expected_output"] = true_expected
+        state["actual_output"]   = true_actual
         state["bug_description"] = data["bug_description"]
 
         print(f"[saboteur] Sabotaged function: {func_name}")
