@@ -10,37 +10,72 @@ from architect.state import ArchitectState
 _LEVEL_INSTRUCTIONS = {
     1: """
 You are performing a Level 1 ("Messy Code") sabotage on a SINGLE Python function.
-Rules:
-- Rename ALL internal local variables to meaningless names like var1, var2, temp_x, result_val, etc.
-  (Do NOT rename the function itself or its parameters — those are the public API.)
-- Add misleading inline comments that describe the CORRECT behavior while the code does the WRONG thing.
-- Inject EXACTLY ONE subtle logical bug. Acceptable bug types:
-    * Off-by-one error (e.g., < instead of <=, range(n) instead of range(n+1))
-    * Wrong arithmetic operator (e.g., - instead of +, * instead of /)
-    * Wrong comparison operator (e.g., > instead of >=)
-  The bug must be fixable in 1–3 lines without renaming, refactoring, or adding imports.
+
+STEP 1 — Understand the function contract:
+  Read the function carefully. Identify exactly what it is SUPPOSED to do:
+  its inputs, its expected outputs, and its core logic (loop, filter, accumulation, transformation).
+
+STEP 2 — Inject a FUNCTIONAL bug (the code runs but does the wrong thing):
+  Break the core behavior in a way that is non-obvious. Good examples:
+    * A loop that should process ALL elements but skips one (off-by-one in range or index)
+    * A filter/condition that should INCLUDE a class of inputs but now EXCLUDES them (or vice versa)
+    * An accumulator initialized to the wrong value (e.g., 1 instead of 0)
+    * A return that happens one iteration too early
+    * A comparison that causes the wrong branch to be taken for a common input
+  You may make 1–3 small coordinated changes to produce the behavioral failure.
+  The bug must make the function return a WRONG RESULT for a clear, representable test case.
+
+STEP 3 — Obfuscate: rename every internal local variable to meaningless names
+  (var1, temp_x, result_buf, d_ptr, etc.).
+  Do NOT rename the function itself, its parameters, or any imported names.
+
+STEP 4 — Add 1–2 misleading inline comments near the bug site that describe
+  what the code SHOULD be doing, while it is actually doing the wrong thing.
 """,
     2: """
 You are performing a Level 2 ("Spaghetti Logic") sabotage on a SINGLE Python function.
-Rules:
-- Rename ALL internal local variables to meaningless names (var1, temp_x, flag_a, etc.).
-  (Do NOT rename the function itself or its parameters.)
-- Add misleading comments inside conditionals that describe correct behavior while code is wrong.
-- Inject EXACTLY ONE subtle logical bug:
-    * A wrong condition branch (e.g., `if x > 0` instead of `if x >= 0`)
-    * A loop boundary error
-    * A wrong variable used inside a nested if
-  The bug must be fixable in 1–3 lines.
+
+STEP 1 — Understand the function contract:
+  Read the function carefully. Identify its purpose, its conditional branches,
+  and what each path is supposed to return.
+
+STEP 2 — Inject a FUNCTIONAL bug inside a branch or loop:
+  Break logic so a specific class of inputs is handled incorrectly. Good examples:
+    * A branch that should handle a special case (zero, empty, negative) now handles the wrong case
+    * A loop that builds a result correctly for most inputs but silently drops or duplicates one category
+    * Two variables swapped in a conditional body (uses var_a where var_b was intended)
+    * A guard condition inverted so the default path handles what the special path should
+  You may make 1–3 coordinated changes. The code must still run without errors.
+
+STEP 3 — Obfuscate: rename every internal local variable (flag_a, temp_x, ptr_b, etc.).
+  Do NOT rename the function name, parameters, or imported names.
+
+STEP 4 — Add 1–2 misleading inline comments near the bug that accurately describe
+  the INTENDED behavior, making the student read "correct" documentation next to wrong code.
 """,
     3: """
 You are performing a Level 3 ("Sensitive Code") sabotage on a SINGLE Python function.
-Rules:
-- Rename ALL internal local variables to meaningless names (var1, coeff_a, magic_val, etc.).
-  (Do NOT rename the function itself or its parameters.)
-- Corrupt EXACTLY ONE numeric constant (magic number) in the formula by a small but impactful
-  amount (e.g., change 1.0 to 1.1, change 2 to 3, change 0.5 to 0.05).
-- Add a comment beside the corrupted constant that describes what the CORRECT value should produce.
-- The bug must be fixable by changing only that one number (1–3 lines max).
+
+STEP 1 — Understand the function contract:
+  Read the function carefully. Identify the mathematical formula or algorithm it implements
+  and which numeric constants are critical to its correctness.
+
+STEP 2 — Inject a FUNCTIONAL numeric bug:
+  Corrupt the behavior by changing one or two numeric constants so that:
+    * The result is plausibly wrong (not obviously zero or infinity)
+    * Diagnosing it requires understanding the formula, not just reading the code
+  Good examples:
+    * Change a divisor from N to N+1 (average becomes wrong)
+    * Change an exponent from 2 to 3 (quadratic becomes cubic)
+    * Swap the order of subtraction (a-b becomes b-a, sign flips)
+    * Change a threshold constant that controls branching
+  You may make 1–3 changes. The code must still run without errors.
+
+STEP 3 — Obfuscate: rename every internal local variable (coeff_a, magic_val, var1, etc.).
+  Do NOT rename the function name, parameters, or imported names.
+
+STEP 4 — Add 1–2 misleading inline comments near the corrupted constants
+  that describe the CORRECT formula, while the code implements the wrong one.
 """,
 }
 
@@ -55,7 +90,7 @@ Reply with ONLY a valid JSON object (no markdown, no explanation), matching this
   "test_args": "<example argument list as a Python literal, e.g. (10, 3) or ('hello',)>",
   "expected_output": "<string representation of the CORRECT return value>",
   "actual_output": "<string representation of the BUGGY return value>",
-  "bug_description": "<one sentence describing exactly what you changed and why it breaks things>"
+  "bug_description": "<one sentence describing the FUNCTIONAL behavior that is now broken and why>"
 }
 
 Critical rules:
