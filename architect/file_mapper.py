@@ -4,7 +4,8 @@ import random
 
 from architect.state import ArchitectState
 
-SKIP_DIRS = {"__pycache__", ".git", ".tox", "venv", "env", "node_modules", "migrations"}
+SKIP_DIRS = {"__pycache__", ".git", ".tox", "venv", "env", "node_modules", "migrations",
+             "tests", "test", "spec", "specs"}
 SKIP_FILES = {"setup.py", "conftest.py"}
 
 _UTILITY_HINTS = ("util", "math", "string", "str", "num", "convert", "parse",
@@ -80,6 +81,8 @@ def map_files(state: ArchitectState) -> ArchitectState:
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         for fname in files:
             if not fname.endswith(".py") or fname in SKIP_FILES:
+                continue
+            if fname.startswith("test_") or fname.endswith("_test.py"):
                 continue
             full = os.path.join(root, fname)
             s = _score_file(full)

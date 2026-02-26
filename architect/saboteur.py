@@ -160,6 +160,9 @@ def _pick_best_function(source: str) -> str:
             continue
         if node.name.startswith("__") or node.name.startswith("_"):
             continue
+        # Skip test functions — they have no meaningful return value to sabotage
+        if node.name.startswith("test"):
+            continue
         if node.end_lineno - node.lineno < 5:
             continue
 
@@ -256,6 +259,11 @@ def sabotage(state: ArchitectState) -> ArchitectState:
         }
         if func_name not in module_func_names:
             print(f"[saboteur] GPT renamed function on attempt {attempt} — retrying")
+            continue
+
+        # Verify the bug actually produces a different result
+        if data["expected_output"].strip() == data["actual_output"].strip():
+            print(f"[saboteur] expected == actual on attempt {attempt} — retrying")
             continue
 
         # Success
