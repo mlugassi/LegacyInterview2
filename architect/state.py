@@ -8,6 +8,7 @@ class ArchitectState(TypedDict):
     original_code: str     # file content before sabotage
     sabotaged_code: str    # file content after sabotage
     difficulty_level: int  # 1, 2, or 3
+    num_bugs: int          # number of bugs to inject (CLI --num-bugs, default 1)
     function_name: str     # the sabotaged function
     test_args: str         # first failing case args (for README / legacy use)
     expected_output: str   # correct return value for first failing case

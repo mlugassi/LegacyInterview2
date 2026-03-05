@@ -9,8 +9,6 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from architect.state import ArchitectState
 
-# How many helpers to inject bugs into per level
-_BUGS_PER_LEVEL = {1: 1, 2: 2, 3: 2}
 # Maximum call-chain depth to descend when picking bug targets
 # Level 1 → depth 2 (surface → helper)
 # Level 2 → depth 3 (surface → mid → helper)
@@ -50,8 +48,9 @@ STEP 2 — Invent and inject ONE FUNCTIONAL bug of your own choosing:
     * The bug must be non-obvious — require tracing logic to find
   Make 1–3 coordinated changes.
 
-STEP 3 — Rename every internal local variable to a meaningless name (var1, temp_x, ptr_b, etc.).
-  Do NOT rename the function itself, its parameters, or any imported names.
+STEP 3 — Rename ALL parameters AND ALL local variables to meaningless names (var1, temp_x, ptr_b, etc.).
+  This means EVERY argument in the `def` line AND every variable assigned inside the function body.
+  Do NOT rename the function itself, called function names, or any imported/global names.
   Do NOT add any comments.
 """,
     3: """
@@ -69,8 +68,9 @@ STEP 2 — Invent and inject ONE FUNCTIONAL bug of your own choosing:
     * The bug must be non-obvious — require understanding the algorithm to diagnose
   Make 1–3 coordinated changes.
 
-STEP 3 — Rename every internal local variable to a meaningless name (coeff_a, magic_val, var1, etc.).
-  Do NOT rename the function itself, its parameters, or any imported names.
+STEP 3 — Rename ALL parameters AND ALL local variables to meaningless names (coeff_a, magic_val, var1, etc.).
+  This means EVERY argument in the `def` line AND every variable assigned inside the function body.
+  Do NOT rename the function itself, called function names, or any imported/global names.
 
 STEP 4 — Add 1–2 misleading inline comments near the bug site.
   Each comment must describe what the code APPEARS to be doing correctly — as if it is right.
@@ -119,7 +119,7 @@ Critical rules:
   The sabotaged function must still run without raising exceptions; it just returns the wrong result.
   If your bug causes a TypeError, AttributeError, or any other exception, it will be REJECTED.
   Change a condition, a boundary, an operator, or a value — not the structure so drastically it crashes.
-- test_cases must contain EXACTLY 5 entries with DIVERSE inputs that exercise different code paths.
+- test_cases must contain EXACTLY 8 entries with DIVERSE inputs that exercise different code paths.
   Each "args" must be a Python tuple literal using ONLY these primitives: int, float, str, list, dict, bool.
   NEVER use: lambda, range, callable, custom classes, or any non-serializable object.
   NEVER use keyword arguments — only positional values inside the tuple.
@@ -389,22 +389,31 @@ def _has_revealing_comment(original_func: str, sabotaged_func: str) -> bool:
 
 
 def _variables_were_renamed(original_func: str, sabotaged_func: str) -> bool:
-    """Return True if at least one local variable was renamed (or if there were none to rename)."""
-    def local_store_names(src: str) -> set:
+    """Return True if at least one parameter or local variable was renamed."""
+    def all_user_names(src: str) -> set:
         try:
             tree = ast.parse(textwrap.dedent(src))
         except SyntaxError:
             return set()
-        return {
-            node.id for node in ast.walk(tree)
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
-        }
+        names: set[str] = set()
+        for node in ast.walk(tree):
+            # local variables
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                names.add(node.id)
+            # parameters
+            if isinstance(node, ast.arguments):
+                for arg in node.args + node.posonlyargs + node.kwonlyargs:
+                    names.add(arg.arg)
+                if node.vararg:
+                    names.add(node.vararg.arg)
+                if node.kwarg:
+                    names.add(node.kwarg.arg)
+        return names
 
-    orig = local_store_names(original_func)
+    orig = all_user_names(original_func)
     if not orig:
         return True  # nothing to rename; skip the check
-    sabot = local_store_names(sabotaged_func)
-    # At least one original local name must have disappeared (was renamed)
+    sabot = all_user_names(sabotaged_func)
     return bool(orig - sabot)
 
 
@@ -565,11 +574,56 @@ def _sabotage_one_helper(
     return None, None
 
 
+def _obfuscate_func_identifiers(func_name: str, current_source: str, llm) -> str:
+    """
+    Level 2/3 post-pass: rename ALL parameters and local variables in func_name
+    to meaningless names. Used for functions in the call chain that were NOT the
+    direct sabotage target (surface function, intermediates).
+    Returns updated full source, or the original on any failure.
+    """
+    try:
+        func_source, start_line, end_line = _extract_function_source(current_source, func_name)
+    except ValueError:
+        return current_source
+
+    prompt = (
+        f"Rename ALL parameters and ALL local variables in the Python function below "
+        f"to meaningless names like var1, var2, temp1, temp2, coeff1, ptr1, etc.\n"
+        f"Rules:\n"
+        f"  - Keep the function NAME exactly: `{func_name}`\n"
+        f"  - Keep every CALLED function name exactly as-is\n"
+        f"  - Keep all imported names, global references, and string/number literals as-is\n"
+        f"  - Do NOT add, remove, or change any comments\n"
+        f"  - Do NOT change the logic in any way\n"
+        f"  - Return ONLY the complete `def` block — no explanation, no markdown\n\n"
+        f"FUNCTION TO OBFUSCATE:\n{func_source}"
+    )
+
+    try:
+        response = llm.invoke([HumanMessage(content=prompt)])
+        obfuscated = response.content.strip()
+        if obfuscated.startswith("```"):
+            parts = obfuscated.split("```")
+            obfuscated = parts[1] if len(parts) > 1 else obfuscated
+            if obfuscated.startswith("python"):
+                obfuscated = obfuscated[6:]
+            obfuscated = obfuscated.strip()
+        ast.parse(obfuscated)  # syntax check
+        lines = current_source.splitlines(keepends=True)
+        new_source = "".join(lines[:start_line]) + obfuscated + "\n" + "".join(lines[end_line:])
+        ast.parse(new_source)  # full-source sanity check
+        print(f"[saboteur] Obfuscated identifiers in '{func_name}'")
+        return new_source
+    except Exception as e:
+        print(f"[saboteur] Obfuscation of '{func_name}' failed: {e} — keeping original")
+        return current_source
+
+
 def sabotage(state: ArchitectState) -> ArchitectState:
     level = state["difficulty_level"]
     instructions = _LEVEL_INSTRUCTIONS.get(level, _LEVEL_INSTRUCTIONS[1])
 
-    n_bugs    = _BUGS_PER_LEVEL.get(level, 1)
+    n_bugs    = max(1, state.get("num_bugs") or 1)
     max_depth = _MAX_DEPTH_LEVEL.get(level, 2)
 
     # Build the queue of files to try: chosen file first, then all other candidates
@@ -750,6 +804,16 @@ def sabotage(state: ArchitectState) -> ArchitectState:
 
             print(f"[saboteur] Verified {len(verified_cases)} test cases; "
                   f"first failing: {first_fail_args} → expected={first_expected}, got={first_actual}")
+
+            # Level 2/3: obfuscate params+vars in every other function in the call chain
+            # (the bug_targets were already obfuscated inside _sabotage_one_helper)
+            if level >= 2:
+                all_chain_funcs: set[str] = set()
+                for chain in bug_chains.values():
+                    all_chain_funcs.update(chain)
+                to_obfuscate = [f for f in all_chain_funcs if f not in set(bug_targets)]
+                for fname in to_obfuscate:
+                    current_source = _obfuscate_func_identifiers(fname, current_source, llm)
 
             # Success — update target_file/original_code in case we used a fallback file
             state["target_file"]     = current_file
