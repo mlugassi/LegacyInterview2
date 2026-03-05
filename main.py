@@ -37,14 +37,19 @@ def main() -> None:
         "--level", type=int, choices=[1, 2, 3], default=1,
         help="Difficulty level: 1=Messy Code, 2=Spaghetti Logic, 3=Sensitive Code (default: 1)"
     )
+    parser.add_argument(
+        "--num-bugs", type=int, default=1,
+        help="Number of bugs to inject (default: 1)"
+    )
     args = parser.parse_args()
 
-    print(f"\n[architect] Starting — URL: {args.github_url}  Level: {args.level}\n")
+    print(f"\n[architect] Starting — URL: {args.github_url}  Level: {args.level}  Bugs: {args.num_bugs}\n")
 
     graph = build_graph()
     initial_state = {
         "github_url": args.github_url,
         "difficulty_level": args.level,
+        "num_bugs": args.num_bugs,
         # remaining fields will be populated by graph nodes
         "clone_path": "",
         "target_file": "",
@@ -56,6 +61,8 @@ def main() -> None:
         "actual_output": "",
         "bug_description": "",
         "challenge_summary": "",
+        "test_cases": [],
+        "candidate_files": [],
     }
 
     graph.invoke(initial_state)
