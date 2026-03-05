@@ -44,7 +44,12 @@ def _score_file(path: str) -> int:
         return -1
 
     if len(source.splitlines()) < 20:
-        return 0
+        return -1000  # too short
+
+    # Pure data/config files with no functions can't be sabotaged
+    func_count = sum(1 for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
+    if func_count == 0:
+        return -1000
 
     score = 0
     basename = os.path.basename(path).lower()
@@ -65,10 +70,15 @@ def _score_file(path: str) -> int:
                                "functools", "typing", "string", "random", "copy"):
                     score -= 10
         if isinstance(node, ast.ImportFrom):
-            top = (node.module or "").split(".")[0]
-            if top not in ("os", "sys", "math", "re", "collections", "itertools",
-                           "functools", "typing", "string", "random", "copy", ""):
-                score -= 5
+            if node.level > 0:
+                # Relative import (from .something import X) — file depends on package
+                # structure; functions can't be exec-tested in isolation.
+                score -= 25
+            else:
+                top = (node.module or "").split(".")[0]
+                if top not in ("os", "sys", "math", "re", "collections", "itertools",
+                               "functools", "typing", "string", "random", "copy", ""):
+                    score -= 5
 
     return score
 
@@ -76,6 +86,7 @@ def _score_file(path: str) -> int:
 def map_files(state: ArchitectState) -> ArchitectState:
     clone_path = state["clone_path"]
     scored: list[tuple[int, str]] = []
+    fallback: list[tuple[int, str]] = []
 
     for root, dirs, files in os.walk(clone_path):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
@@ -88,20 +99,33 @@ def map_files(state: ArchitectState) -> ArchitectState:
             s = _score_file(full)
             if s > 0:
                 scored.append((s, full))
+            elif s > -999:  # parseable but penalised — keep as fallback
+                fallback.append((s, full))
 
+    # If no file scored positively, use the best-scoring fallback candidates
     if not scored:
-        raise RuntimeError("No suitable Python file found in repository.")
+        if not fallback:
+            raise RuntimeError("No suitable Python file found in repository.")
+        print("[mapper] No files scored > 0; using best-available fallback candidates.")
+        scored = fallback
 
     # Sort descending, take top N, then pick one at random
     scored.sort(key=lambda x: x[0], reverse=True)
     top_n = scored[:_TOP_N_FILES]
     chosen_score, chosen_path = random.choice(top_n)
 
+    # Build ordered fallback list: chosen first, then remaining candidates by score
+    all_sorted_paths = [p for _, p in scored]
+    remaining = [p for p in all_sorted_paths if p != chosen_path]
+    candidate_files = [chosen_path] + remaining
+
     with open(chosen_path, encoding="utf-8", errors="ignore") as f:
         content = f.read()
 
     print(f"[mapper] Top candidates: {[os.path.basename(p) for _, p in top_n]}")
     print(f"[mapper] Randomly selected: {chosen_path} (score={chosen_score})")
+    print(f"[mapper] {len(candidate_files)} total candidates available as fallback")
     state["target_file"] = chosen_path
     state["original_code"] = content
+    state["candidate_files"] = candidate_files
     return state

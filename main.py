@@ -56,6 +56,8 @@ def main() -> None:
         "actual_output": "",
         "bug_description": "",
         "challenge_summary": "",
+        "test_cases": [],
+        "candidate_files": [],
     }
 
     graph.invoke(initial_state)
