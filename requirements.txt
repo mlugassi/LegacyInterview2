@@ -3,3 +3,4 @@ langgraph
 langchain-core
 gitpython
 python-dotenv
+gradio
