@@ -17,3 +17,5 @@ class ArchitectState(TypedDict):
     challenge_summary: str # final printout for the architect
     test_cases: list       # [{"args": str, "expected": str}, ...] verified cases
     candidate_files: list  # all scored file paths (sorted best-first) for fallback
+    bug_func_name: str     # internal: name of the sabotaged helper function (passed between nodes)
+    bug_func_source: str   # internal: exact buggy source of the helper (passed between nodes)

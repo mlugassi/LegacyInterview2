@@ -3,7 +3,13 @@ import os
 from architect.state import ArchitectState
 from architect.repo_cloner import clone_repo
 from architect.file_mapper import map_files
-from architect.saboteur import sabotage
+from architect.saboteur import (
+    sabotage_init,
+    code_inflation,
+    apply_obfuscation_level_1,
+    apply_obfuscation_level_2,
+    verify_sabotage,
+)
 from architect.challenge_deployer import deploy_challenge
 from architect.readme_generator import create_readme
 
@@ -16,8 +22,29 @@ def node_map_files(state: ArchitectState) -> ArchitectState:
     return map_files(state)
 
 
-def node_sabotage(state: ArchitectState) -> ArchitectState:
-    return sabotage(state)
+def node_sabotage_init(state: ArchitectState) -> ArchitectState:
+    """Node 1 — Target Selection: pick the function and inject the AI-resistant bug."""
+    return sabotage_init(state)
+
+
+def node_code_inflation(state: ArchitectState) -> ArchitectState:
+    """Node 2 — Anti-Analysis Bloating: inflate the target file to 200+ lines."""
+    return code_inflation(state)
+
+
+def node_obfuscation_level_1(state: ArchitectState) -> ArchitectState:
+    """Node 3 — Semantic Stripping (Level 1/3): rename vars to meaningless identifiers."""
+    return apply_obfuscation_level_1(state)
+
+
+def node_obfuscation_level_2(state: ArchitectState) -> ArchitectState:
+    """Node 4 — Deep Nesting (Level 2/3): 10+ call-depth spaghettification."""
+    return apply_obfuscation_level_2(state)
+
+
+def node_verify_sabotage(state: ArchitectState) -> ArchitectState:
+    """Node 5 — Integrity Check: confirm bug still manifests, no crashes introduced."""
+    return verify_sabotage(state)
 
 
 def node_overwrite_file(state: ArchitectState) -> ArchitectState:

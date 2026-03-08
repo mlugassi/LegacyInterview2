@@ -1,6 +1,7 @@
 import ast
 import difflib
 import json
+import os
 import random
 import textwrap
 
@@ -15,71 +16,51 @@ from architect.state import ArchitectState
 # Level 3 → depth 4 (surface → mid → mid2 → helper)
 _MAX_DEPTH_LEVEL = {1: 4, 2: 4, 3: 4}
 
-_LEVEL_INSTRUCTIONS = {
-    1: """
-You are performing a Level 1 sabotage on a SINGLE Python function.
+# All levels share the same bug-injection instruction.
+# Structural transformations (obfuscation, spaghettification) are applied as
+# separate post-passes in sabotage() based on the difficulty level.
+_BUG_INJECTION_INSTRUCTION = """
+You are sabotaging a SINGLE Python function with an AI-RESISTANT bug.
 
 STEP 1 — Understand the function contract:
   Read the function carefully. Identify exactly what it is SUPPOSED to do:
   its inputs, its expected outputs, and its core logic.
 
-STEP 2 — Invent and inject ONE FUNCTIONAL bug of your own choosing:
-  You decide the bug type — be creative and pick something that fits THIS specific function.
+STEP 2 — Invent and inject ONE AI-RESISTANT FUNCTIONAL bug of your own choosing:
+  The bug MUST be subtle, context-dependent, and extremely hard for an LLM to identify
+  by reading the function in isolation. It should require deep understanding of the
+  surrounding logic or call context to detect.
+
+  PREFERRED bug types (pick whichever fits this specific function best):
+    * Off-by-one in a specific edge case — wrong loop bound or index that only
+      matters for a particular pattern of inputs (e.g. empty sequences, odd-length lists)
+    * Subtle operator swap that is only wrong in certain conditions — e.g. < vs <=,
+      + vs -, | vs &, that look correct at first glance but fail on boundary values
+    * Wrong variable used in a rare branch — copies a visually similar variable name
+      in the wrong context so casual readers assume it is correct
+    * Precedence error — missing parentheses that change evaluation order only for
+      specific operand combinations, not for the common case
+    * State-dependent side effect — a mutation or accumulation that only causes a
+      visible result mismatch after specific sequences of operations
+    * Subtle type / comparison issue — comparing by identity instead of value, or an
+      implicit type coercion that produces the wrong result for certain input types
+    * Wrong default assumption — a constant, threshold, or sentinel that is slightly
+      off (e.g. 0 instead of 1, -1 instead of None) but only matters in edge cases
+
   Requirements:
     * The code must still run without exceptions on valid inputs
     * The function must return a WRONG RESULT for at least some inputs
-    * The bug must be non-obvious — a student needs to read the logic carefully to spot it
+    * The bug must be non-obvious — a student must read the logic carefully to spot it
+    * The bug must NOT be trivially fixable by an LLM reading the function in isolation;
+      it should look plausible and correct at a quick glance
   Make 1–3 small coordinated changes to produce the behavioral failure.
   Do NOT rename any variables, do NOT add comments.
   Return the function with ONLY the bug injected — keep everything else identical.
-""",
-    2: """
-You are performing a Level 2 sabotage on a SINGLE Python function.
-This builds on Level 1: inject a bug AND obfuscate variable names.
+"""
 
-STEP 1 — Understand the function contract:
-  Read the function carefully. Identify exactly what it is SUPPOSED to do.
-
-STEP 2 — Invent and inject ONE FUNCTIONAL bug of your own choosing:
-  You decide the bug type — be creative and pick something that fits THIS specific function.
-  Requirements:
-    * The code must still run without exceptions on valid inputs
-    * The function must return a WRONG RESULT for at least some inputs
-    * The bug must be non-obvious — require tracing logic to find
-  Make 1–3 coordinated changes.
-
-STEP 3 — Rename ALL parameters AND ALL local variables to meaningless names (var1, temp_x, ptr_b, etc.).
-  This means EVERY argument in the `def` line AND every variable assigned inside the function body.
-  Do NOT rename the function itself, called function names, or any imported/global names.
-  Do NOT add any comments.
-""",
-    3: """
-You are performing a Level 3 sabotage on a SINGLE Python function.
-This builds on Level 2: inject a bug, obfuscate variable names, AND add misleading comments.
-
-STEP 1 — Understand the function contract:
-  Read the function carefully. Identify exactly what it is SUPPOSED to do.
-
-STEP 2 — Invent and inject ONE FUNCTIONAL bug of your own choosing:
-  You decide the bug type — be creative and pick something that fits THIS specific function.
-  Requirements:
-    * The code must still run without exceptions on valid inputs
-    * The function must return a WRONG RESULT for at least some inputs
-    * The bug must be non-obvious — require understanding the algorithm to diagnose
-  Make 1–3 coordinated changes.
-
-STEP 3 — Rename ALL parameters AND ALL local variables to meaningless names (coeff_a, magic_val, var1, etc.).
-  This means EVERY argument in the `def` line AND every variable assigned inside the function body.
-  Do NOT rename the function itself, called function names, or any imported/global names.
-
-STEP 4 — Add 1–2 misleading inline comments near the bug site.
-  Each comment must describe what the code APPEARS to be doing correctly — as if it is right.
-  NEVER use words like "incorrect", "wrong", "bug", "error", "broken", "corrupted",
-  "intentional", "mistake", or any synonym that hints at a problem.
-  Example of BAD comment: `# Incorrectly appending closing brace`  ← reveals the bug
-  Example of GOOD comment: `# Append the closing brace to complete the field`  ← looks correct
-""",
-}
+_LEVEL_INSTRUCTIONS = {1: _BUG_INJECTION_INSTRUCTION,
+                       2: _BUG_INJECTION_INSTRUCTION,
+                       3: _BUG_INJECTION_INSTRUCTION}
 
 _SYSTEM_PROMPT = """
 You are the Legacy Challenge Architect. You will receive either ONE or TWO Python functions.
@@ -345,8 +326,7 @@ def _try_exec(full_source: str, func_name: str, test_args_str: str,
     import sys as _sys
     added_path: str | None = None
     if file_path:
-        import os as _os
-        dir_to_add = _os.path.dirname(_os.path.abspath(file_path))
+        dir_to_add = os.path.dirname(os.path.abspath(file_path))
         if dir_to_add not in _sys.path:
             _sys.path.insert(0, dir_to_add)
             added_path = dir_to_add
@@ -556,13 +536,6 @@ def _sabotage_one_helper(
             print(f"[saboteur] Comment reveals bug on attempt {attempt} — retrying")
             continue
 
-        # Renaming is required for levels 2 and 3 only
-        if level >= 2 and not _variables_were_renamed(func_source, sabotaged_func):
-            if attempt < 3:
-                print(f"[saboteur] No variable renaming detected on attempt {attempt} — retrying")
-                continue
-            print(f"[saboteur] WARNING: variable renaming skipped by GPT — accepting anyway")
-
         # Attach debug metadata (not visible to student)
         data["_debug_func_name"]   = bug_func_name
         data["_debug_start_line"]  = start_line
@@ -574,59 +547,519 @@ def _sabotage_one_helper(
     return None, None
 
 
-def _obfuscate_func_identifiers(func_name: str, current_source: str, llm) -> str:
+def _strip_markdown_code(text: str) -> str:
+    """Strip ```python ... ``` or ``` ... ``` fences from a GPT response."""
+    text = text.strip()
+    if text.startswith("```"):
+        parts = text.split("```")
+        text = parts[1] if len(parts) > 1 else text
+        if text.startswith("python"):
+            text = text[6:]
+        text = text.strip()
+    return text
+
+
+def _chain_for_obfuscation(source: str, surface_func: str, max_depth: int = 4) -> set:
+    """BFS call-chain discovery from surface_func through all module-level functions."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return {surface_func}
+    defined = {
+        n.name: n for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    chain: set = set()
+    frontier = {surface_func}
+    for _ in range(max_depth):
+        next_f: set = set()
+        for fname in frontier:
+            if fname in chain or fname not in defined:
+                continue
+            chain.add(fname)
+            for n in ast.walk(defined[fname]):
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+                    if n.func.id in defined and n.func.id not in chain:
+                        next_f.add(n.func.id)
+        frontier = next_f
+        if not frontier:
+            break
+    return chain
+
+
+def _extract_chain_snippet(source: str, chain: set) -> tuple:
     """
-    Level 2/3 post-pass: rename ALL parameters and local variables in func_name
-    to meaningless names. Used for functions in the call chain that were NOT the
-    direct sabotage target (surface function, intermediates).
-    Returns updated full source, or the original on any failure.
+    Build a mini source: header imports + only the chain functions.
+    Returns (mini_source, last_end_lineno_in_original).
     """
     try:
-        func_source, start_line, end_line = _extract_function_source(current_source, func_name)
-    except ValueError:
-        return current_source
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source, len(source.splitlines())
+    lines = source.splitlines(keepends=True)
+    header: list = []
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom, ast.Expr)) and node.lineno <= 80:
+            header.extend(lines[node.lineno - 1:node.end_lineno])
+    blocks: list = []
+    last_end = 0
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in chain:
+            blocks.append("".join(lines[node.lineno - 1:node.end_lineno]))
+            last_end = max(last_end, node.end_lineno)
+    mini = "".join(header) + "\n\n" + "\n\n".join(blocks)
+    return mini, last_end
+
+
+def _splice_transforms_back(original: str, transformed_snippet: str, orig_chain: set) -> str:
+    """
+    Splice transformed functions back into the original file.
+    - Functions in orig_chain (same name) -> replace in-place
+    - New functions (wrappers/ghosts) -> insert after the last replaced block
+    Returns merged source, or original on any parse error.
+    """
+    try:
+        orig_tree = ast.parse(original)
+        new_tree  = ast.parse(transformed_snippet)
+    except SyntaxError:
+        return original
+
+    orig_lines = original.splitlines(keepends=True)
+    new_lines  = transformed_snippet.splitlines(keepends=True)
+
+    new_funcs: dict = {}
+    for node in new_tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            new_funcs[node.name] = "".join(new_lines[node.lineno - 1:node.end_lineno])
+
+    orig_pos: dict = {}
+    for node in orig_tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            orig_pos[node.name] = (node.lineno - 1, node.end_lineno)
+
+    replacements: list = []
+    insertions:   list = []
+    last_replace_end = -1
+
+    for name, src in new_funcs.items():
+        if name in orig_pos:
+            start, end = orig_pos[name]
+            replacements.append((start, end, src))
+            last_replace_end = max(last_replace_end, end)
+        else:
+            insertions.append(src)
+
+    if not replacements:
+        return original
+
+    replacements.sort(key=lambda x: x[0], reverse=True)
+    result = list(orig_lines)
+    size_delta = 0
+    for start, end, new_src in replacements:
+        new_src_lines = (new_src.rstrip("\n") + "\n").splitlines(keepends=True)
+        old_size = end - start
+        result[start:end] = new_src_lines
+        size_delta += len(new_src_lines) - old_size
+
+    if insertions and last_replace_end >= 0:
+        adjusted = last_replace_end + size_delta
+        insert_block = "\n\n" + "\n\n".join(s.rstrip("\n") for s in insertions) + "\n\n"
+        result.insert(adjusted, insert_block)
+
+    return "".join(result)
+
+
+# Horizontal & Vertical Expansion rules applied to EVERY function created or modified.
+_EXPANSION_RULES = """
+MANDATORY EXPANSION RULES — apply to EVERY function you write or modify:
+
+  !! ZERO TOLERANCE ANTI-PATTERN — NEVER produce this: !!
+
+    def _process_segment_core(data_ref, sep=',', prefix=''):
+        \"\"\"Core processing layer.\"\"\"
+        return _process_segment_impl(data_ref, sep, prefix)    # <-- VIOLATION
+
+  A function whose body is ONLY a return-delegation call (1-3 lines total) is a
+  HARD FAILURE.  It will be automatically rejected.  Every wrapper you write —
+  even a "thin" pass-through — MUST look like the CORRECT PATTERN below.
+
+  !! CORRECT PATTERN — every wrapper MUST look like this (50+ lines minimum): !!
+
+    def _process_segment_core(data_ref, sep=',', prefix='', flag=False):
+        \"\"\"Core processing layer.\"\"\"
+        import sys as _sys_ref
+        global _state_flux
+        _buffer_offset = len(str(data_ref)) * 1
+        _tmp_flag = not False
+        _dead_counter = 0
+        _entropy_val = _buffer_offset - _buffer_offset
+        _noise_a = sum(i for i in range(min(_buffer_offset, 5)))
+        _noise_b = _noise_a - _noise_a
+        _checksum_pre = (_buffer_offset % 7) - (_buffer_offset % 7)
+        _ref_copy = data_ref
+        _discarded_a = str(_ref_copy)[::-1][::-1]
+        if _tmp_flag and _buffer_offset >= 0:
+            _dead_list = [x * 0 for x in range(6)]
+            _dead_result = sum(_dead_list)
+            if not (flag is None and False):
+                _checksum = _dead_result % 3
+                if _checksum >= 0:                     # always evaluates true
+                    _tmp_marker = bool(data_ref is not None)
+                    if _tmp_marker == True:             # noqa
+                        _state_flux = _dead_result
+                        _entropy_b = len(_discarded_a) - len(_discarded_a)
+                        # do not touch
+                        if _entropy_b == 0:
+                            _noise_c = [i - i for i in range(4)]
+                            _ = sum(_noise_c)
+                            # logic starts here
+                            _sep_copy = sep if sep is not None else sep
+                            _pre_copy = prefix if not (prefix is None and False) else prefix
+                            _dead_counter += 0
+                            try:
+                                _intermediate = _process_segment_impl(
+                                    _ref_copy, _sep_copy, _pre_copy, flag
+                                )
+                                _post_check = _intermediate is not None
+                                if _post_check == True:  # noqa
+                                    _dead_counter += 0
+                                    _noise_d = _buffer_offset * 0
+                                    return _intermediate
+                            except Exception as _e_flux:
+                                raise
+        return _process_segment_impl(data_ref, sep, prefix, flag)
+
+  EVERY function you write MUST follow this pattern: dense busy-work BEFORE and
+  AFTER the real call, nested conditionals that always evaluate true, dead variables,
+  global declarations, and the actual delegation buried in the middle.
+
+  EXPANSION 1 — EXTREME FUNCTION BLOATING (MINIMUM 50 LINES, NO EXCEPTIONS):
+    Every single function — wrapper, helper, ghost, or original — MUST be at least
+    50 lines long. If you are about to write a function shorter than 50 lines, STOP
+    and add more padding until it reaches 50+.
+    Required padding techniques (use ALL of them):
+    - At least 8-10 dummy local variable assignments at the top: _buf, _flag, _counter, _entropy
+    - At least 2 loop-based dummy computations: `_n = [x*0 for x in range(5)]`
+    - At least 3 levels of always-true nested if/else wrapping the real call
+    - `global _state_flux` declaration inside the function
+    - `import <module>` statement inside the function body
+    - At least 3 trash comments: `# do not touch`, `# logic starts here`, `# ??`
+    - A try/except block wrapping the actual delegation call
+
+  EXPANSION 2 — CALL-STACK OVERLOAD:
+    Inside each function, inject multiple calls to other newly created helper functions.
+    Build a web of dependencies: funcA calls funcB, funcC, funcD; each of those calls
+    3 more. The call graph must be deep and wide so tracing execution is exhausting.
+    Every helper in the web must also follow EXPANSION 1 (bloated to 50+ lines).
+
+  EXPANSION 3 — "WHERE IS THE LOGIC?" CHALLENGE:
+    Surround every real/meaningful call with 5-10 fake "busy-work" calls whose names
+    suggest they are critical infrastructure but actually do nothing:
+        audit_buffer_state()   verify_integrity_checksum()   sync_internal_stack()
+        flush_pipeline_cache()  reindex_lookup_table()   hydrate_context_frame()
+    A debugger stepping through must wade past all these calls to find the one that matters.
+
+  EXPANSION 4 — DEEP NESTING & INDENTATION:
+    Push the actual core logic 5-7 levels deep using nested if/else and try/except blocks.
+    Each nesting level should have a plausible-looking (but ultimately irrelevant) condition.
+    The real work must be buried at the deepest indentation level, far to the right of screen.
+
+  EXPANSION 5 — BUG BURIAL:
+    The injected bug (or the core logic that contains it) MUST NOT appear at the top or
+    bottom of any long function. Bury it around line 40-60 of the function body, inside
+    a deeply nested block, preceded and followed by dense "busy-work" padding code.
+    This ensures the bug is invisible at first glance and exhausts token budgets.
+"""
+
+
+def _obfuscate_full_file(source: str, surface_func_name: str, llm, level: int = 1,
+                         verified_cases: list | None = None, file_path: str | None = None,
+                         bug_func_name: str | None = None, buggy_func_source: str | None = None) -> str:
+    """
+    Level 1 post-pass: legacy obfuscation — cryptic names, deprecated patterns, global vars,
+    mixed styling, removed comments.  When level==3, also injects red-herring decoys.
+    Only the file where the bug was injected is transformed; no other files are touched.
+    After transformation, verifies that surface_func_name still exists and the bug still
+    manifests on at least one verified_case. Falls back to original source on any failure.
+    """
+    # Extract only the chain functions — avoids sending the whole file to GPT
+    chain = _chain_for_obfuscation(source, surface_func_name)
+    mini_source, _ = _extract_chain_snippet(source, chain)
+
+    red_herring_rule = ""
+    if level == 3:
+        red_herring_rule = (
+            "  RULE 8 \u2014 RED HERRINGS (Level 3 only):\n"
+            "    Inject 2-3 convincing decoy bugs that look real but have NO effect on output.\n"
+            "    Examples:\n"
+            "    - A dead if-branch (condition always False) with suspicious-looking code\n"
+            "    - A local variable overwritten immediately before use (looks like wrong value)\n"
+            "    - A commented-out line hinting at a past fix: `# old fix: x -= 1`\n"
+            "    - Suspicious math `result = result * 1.0000001` that looks wrong but is harmless\n"
+            "    These MUST NOT change the observable output \u2014 pure misdirection only.\n\n"
+        )
+
+    bug_preservation_rule = ""
+    if bug_func_name and buggy_func_source:
+        bug_preservation_rule = (
+            f"  !!! CRITICAL BUG PRESERVATION — read this before doing ANYTHING !!!\n"
+            f"  The function `{bug_func_name}` contains an intentional, hidden bug.\n"
+            f"  When you wrap or restructure this function, you MUST place its logic\n"
+            f"  EXACTLY as shown below into the innermost wrapper — not paraphrased,\n"
+            f"  not rewritten, not 'cleaned up'. Copy every operator, every condition,\n"
+            f"  every loop bound VERBATIM. You may rename parameters/variables for\n"
+            f"  obfuscation, but the LOGICAL STRUCTURE must be byte-for-byte identical.\n"
+            f"  The original buggy function body:\n\n"
+            f"{buggy_func_source}\n\n"
+            f"  Preserve this logic EXACTLY inside the deepest wrapper.\n\n"
+        )
 
     prompt = (
-        f"Rename ALL parameters and ALL local variables in the Python function below "
-        f"to meaningless names like var1, var2, temp1, temp2, coeff1, ptr1, etc.\n"
-        f"Rules:\n"
-        f"  - Keep the function NAME exactly: `{func_name}`\n"
-        f"  - Keep every CALLED function name exactly as-is\n"
-        f"  - Keep all imported names, global references, and string/number literals as-is\n"
-        f"  - Do NOT add, remove, or change any comments\n"
-        f"  - Do NOT change the logic in any way\n"
-        f"  - Return ONLY the complete `def` block — no explanation, no markdown\n\n"
-        f"FUNCTION TO OBFUSCATE:\n{func_source}"
+        f"Refactor ONLY the following Python file into LEVEL 1 — Obfuscated Legacy code.\n"
+        f"SCOPE: Modify ONLY this file. Do NOT touch any other file in the project.\n"
+        f"All logic and any existing bugs MUST be preserved EXACTLY — same inputs, same outputs.\n\n"
+        f"=== LEVEL 1 RULES — apply ALL of them aggressively ===\n\n"
+        f"  RULE 1 — MANDATORY SHADOW WRAPPING (at least 4 calls deep):\n"
+        f"    Every functional logic path must pass through at least 4 function calls.\n"
+        f"    If the original logic is short, create 'Shadow Wrapper' functions around it that\n"
+        f"    perform redundant checks or dummy transformations before delegating:\n"
+        f"      e.g.  x = (x + 0) * 1   or   val = val if val is not None else val\n"
+        f"    Structure every function so its real work is 4 calls deep from the entry point.\n\n"
+        f"  RULE 1b — NAMING OF NEW WRAPPER & GHOST FUNCTIONS:\n"
+        f"    Every new function you create (shadow wrappers, ghost helpers, etc.)\n"
+        f"    MUST have a name that:\n"
+        f"    a) Sounds domain-relevant and meaningful — not random noise. It should look\n"
+        f"       like a real, important function someone wrote intentionally.\n"
+        f"    b) Is easily confused with the REAL functions in the file. If the real\n"
+        f"       function is `{surface_func_name}`, create wrappers named things like:\n"
+        f"       `_{surface_func_name}_core`, `_{surface_func_name}_impl`,\n"
+        f"       `_{surface_func_name}_internal`, `_{surface_func_name}_dispatch`\n"
+        f"       Or use near-identical names with a subtle difference: one extra underscore,\n"
+        f"       a digit suffix, a transposed letter (e.g. `slpit_format_str` vs `split`).\n"
+        f"    c) Makes it IMPOSSIBLE to tell at a glance which function does the real work\n"
+        f"       and which ones are just wrappers or dead weight.\n"
+        f"    Goal: a reader scanning function names should find 5-10 candidates that ALL\n"
+        f"    look like the entry point, with no obvious clue which is authoritative.\n\n"
+        f"  RULE 2 — CRYPTIC & MISLEADING VARIABLE/PARAM NAMES:\n"
+        f"    Rename ALL parameters and ALL local variables inside every function to\n"
+        f"    visually confusing or completely misleading names.\n"
+        f"    Mandatory mix of these styles:\n"
+        f"    - Look-alike names: l1I, O0O, lI1, Il1I, oO0, temp_val_01, x1l, lx1\n"
+        f"    - Irrelevant nouns: pigeon, banana, turnip, flux, zeta, gloop, rutabaga\n"
+        f"    - Misleading antonyms: a True flag named `isEmpty`, a counter named `totalIgnored`\n"
+        f"    - Mix camelCase / snake_case / PascalCase / ALL_CAPS with zero consistency\n"
+        f"    - Update ALL call sites to use the renamed identifiers consistently.\n\n"
+        f"  RULE 3 — NESTED IF-ELSE MAZE & BOOLEAN OBFUSCATION:\n"
+        f"    Inside EVERY function, inject complex nested if/else chains with redundant,\n"
+        f"    convoluted boolean logic to obscure the actual execution path:\n"
+        f"    - Use `&`, `|`, `^`, `not not`, `bool()`, `== True`, `!= False`,\n"
+        f"      double negations `not (not x)`, pointless `x * 1 + 0 - 0`\n"
+        f"    - Conditions that look uncertain but always evaluate to the same path\n"
+        f"    - Goal: an AI must struggle to map variables to their actual purpose.\n\n"
+        f"  RULE 4 — GLOBAL DECLARATIONS & DEPRECATED SYNTAX:\n"
+        f"    Add unnecessary `global _state_flux` declarations inside functions.\n"
+        f"    Use old-style string formatting (`%s`, `%d`) instead of f-strings.\n"
+        f"    Add pointless `import` statements inside function bodies.\n\n"
+        f"  RULE 5 — TRASH COMMENTS (remove all useful ones):\n"
+        f"    Delete every helpful comment. Replace with maximally useless noise:\n"
+        f"    `# logic starts here`, `# do not touch`, `# entropy increases`, `# ??`\n"
+        f"    Add comments that describe the OPPOSITE of what the next line does.\n\n"
+        f"  RULE 6 — DEAD WEIGHT:\n"
+        f"    Add ghost variables assigned but never read: `_dead = x * 3`\n"
+        f"    Add ghost functions defined but never called.\n"
+        f"    Sprinkle `if True: pass` blocks and useless intermediate assignments.\n\n"
+        f"{red_herring_rule}"
+        f"{bug_preservation_rule}"
+        f"HARD CONSTRAINTS (NEVER violate):\n"
+        f"  - Keep `{surface_func_name}` with its EXACT original name and signature.\n"
+        f"  - Do NOT fix any bugs — all buggy behaviour MUST be preserved exactly.\n"
+        f"  - The file MUST remain valid, runnable Python (no syntax errors).\n"
+        f"  - Do NOT mix tabs and spaces for indentation (Python forbids it).\n"
+        f"  - Keep all module-level import statements unchanged.\n"
+        f"  - Return ONLY the complete modified Python file — no explanation, no markdown.\n\n"
+        f"FUNCTIONS TO TRANSFORM (extracted from a larger file):\n{mini_source}"
+        f"\n\n{_EXPANSION_RULES}"
+        f"\n\nCRITICAL OUTPUT FORMAT: Return ONLY Python function definitions "
+        f"(def ...: ...) — no imports, no module-level code, no markdown fences. "
+        f"Include EVERY new wrapper/helper function you create."
     )
-
     try:
         response = llm.invoke([HumanMessage(content=prompt)])
-        obfuscated = response.content.strip()
-        if obfuscated.startswith("```"):
-            parts = obfuscated.split("```")
-            obfuscated = parts[1] if len(parts) > 1 else obfuscated
-            if obfuscated.startswith("python"):
-                obfuscated = obfuscated[6:]
-            obfuscated = obfuscated.strip()
-        ast.parse(obfuscated)  # syntax check
-        lines = current_source.splitlines(keepends=True)
-        new_source = "".join(lines[:start_line]) + obfuscated + "\n" + "".join(lines[end_line:])
-        ast.parse(new_source)  # full-source sanity check
-        print(f"[saboteur] Obfuscated identifiers in '{func_name}'")
-        return new_source
+        snippet = _strip_markdown_code(response.content)
+        snip_tree = ast.parse(snippet)
     except Exception as e:
-        print(f"[saboteur] Obfuscation of '{func_name}' failed: {e} — keeping original")
-        return current_source
+        print(f"[saboteur] Obfuscation failed (parse/call): {e} — keeping original")
+        return source
+
+    # Verify the surface function was not renamed by GPT
+    all_func_names = {
+        n.name for n in ast.walk(snip_tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    if surface_func_name not in all_func_names:
+        print(f"[saboteur] Obfuscation renamed `{surface_func_name}` — reverting")
+        return source
+
+    # Splice the transformed snippet back into the full original file
+    result = _splice_transforms_back(source, snippet, chain)
+
+    # Verify the bug still manifests on at least one test case in the spliced result
+    if verified_cases:
+        bug_still_present = False
+        for tc in verified_cases:
+            ok, act = _try_exec(result, surface_func_name, tc["args"], file_path=file_path)
+            if ok and act != tc["expected"]:
+                bug_still_present = True
+                break
+        if not bug_still_present:
+            print("[saboteur] Obfuscation removed the bug — reverting")
+            return source
+
+    print(f"[saboteur] Level {level} obfuscation applied ({len(result.splitlines())} lines)")
+    return result
 
 
-def sabotage(state: ArchitectState) -> ArchitectState:
+def _spaghettify_file(source: str, surface_func_name: str, llm,
+                      file_path: str, verified_cases: list,
+                      bug_func_name: str | None = None, buggy_func_source: str | None = None) -> tuple[str, list]:
+    """
+    Level 2 post-pass: Black Box Wrapping — buries the core logic of every function
+    inside 4-5 layers of complex wrapper functions filled with conditional mazes,
+    obfuscated data passing, and busy-work logic. Only the target file is transformed.
+    Returns (new_source, re_verified_cases). Falls back to (source, verified_cases) if the
+    transformation breaks syntax or removes the bug from all test cases.
+    """
+    # Extract only the chain functions — avoids sending the whole file to GPT
+    chain = _chain_for_obfuscation(source, surface_func_name)
+    mini_source, _ = _extract_chain_snippet(source, chain)
+
+    bug_preservation_rule = ""
+    if bug_func_name and buggy_func_source:
+        bug_preservation_rule = (
+            f"  !!! CRITICAL BUG PRESERVATION — read this before doing ANYTHING !!!\n"
+            f"  The function `{bug_func_name}` contains an intentional, hidden bug.\n"
+            f"  When you wrap or move this function's logic, you MUST place it EXACTLY\n"
+            f"  as shown below into the innermost helper — not paraphrased, not rewritten.\n"
+            f"  Copy every operator, every condition, every loop bound VERBATIM.\n"
+            f"  You may rename parameters/variables for the Level 2 naming scheme,\n"
+            f"  but the LOGICAL STRUCTURE must be byte-for-byte identical.\n"
+            f"  The original buggy function body:\n\n"
+            f"{buggy_func_source}\n\n"
+            f"  Preserve this logic EXACTLY inside the deepest wrapper.\n\n"
+        )
+
+    prompt = (
+        f"Refactor ONLY the following Python file into LEVEL 2 — Extreme Spaghetti (The Maze).\n"
+        f"SCOPE: Modify ONLY this file. Do NOT touch any other file in the project.\n"
+        f"All existing logic and any bugs MUST be preserved EXACTLY — same inputs, same outputs.\n\n"
+        f"=== LEVEL 2 RULES — apply ALL aggressively ===\n\n"
+        f"  IMPORTANT — NAMING CONVENTION FOR LEVEL 2:\n"
+        f"    Use NORMAL, STANDARD, READABLE names for all functions and variables.\n"
+        f"    The chaos comes from STRUCTURE and VOLUME, NOT from cryptic names.\n"
+        f"    New helpers must have plausible descriptive names such as:\n"
+        f"    process_segment, validate_entry, resolve_token, compute_result, apply_filter,\n"
+        f"    check_boundary, normalize_value, handle_edge_case, prepare_context, finalize_output\n\n"
+        f"  RULE 1 — EXTREME NESTING (minimum 10 function calls deep):\n"
+        f"    Shatter every original function into a NON-LINEAR chain of at least 10\n"
+        f"    interconnected helpers. The original function body MUST be MOVED (not copied)\n"
+        f"    into the innermost helper. The entry-point function keeps its exact name and\n"
+        f"    signature but becomes a thin dispatcher only.\n"
+        f"    Example chain for `my_func(x, y)` — 10+ layers:\n"
+        f"      my_func -> dispatch_entry -> resolve_pipeline -> evaluate_context ->\n"
+        f"      prepare_execution -> validate_inputs -> check_preconditions ->\n"
+        f"      normalize_arguments -> apply_transformations -> execute_core -> finalize_output\n"
+        f"    The real original logic (with the bug) lives in execute_core or finalize_output.\n\n"
+        f"  RULE 2 — FUNCTION OVERLOAD (each helper calls 3-5 others):\n"
+        f"    Every wrapper in the chain must call 3-5 additional busy-work helper functions\n"
+        f"    before delegating to the next layer. This creates a wide AND deep call graph.\n"
+        f"    CRITICAL: Every busy-work helper must contain REAL code, NOT bare `pass`.\n"
+        f"    Example of a valid busy-work helper:\n"
+        f"      def verify_integrity(data):\n"
+        f"          buffer = [ord(c) for c in str(data)[:8]]\n"
+        f"          checksum = sum(buffer) - sum(buffer)  # always 0\n"
+        f"          return checksum == 0\n\n"
+        f"  RULE 3 — WALL OF CODE (50-100 lines per function):\n"
+        f"    Bloat every function — original and new — to 50-100 lines using Busy-Work:\n"
+        f"    - Redundant local assignments that compute and discard results\n"
+        f"    - Type checks that always pass: `if not isinstance(x, type(x)): raise ValueError()`\n"
+        f"    - Loop-based dummy computations: `_ = [i*2 for i in range(len(str(x)))]`\n"
+        f"    - Try/except blocks that catch nothing meaningful\n"
+        f"    Goal: make every function a visual wall so the reader cannot find the real work.\n\n"
+        f"  RULE 4 — CONDITIONAL MAZE in every layer:\n"
+        f"    Inside every layer, add 3-5 levels of nested if/else with always-true conditions\n"
+        f"    so execution always reaches the real call:\n"
+        f"      if data is not None and len(str(data)) >= 0:\n"
+        f"          if not (result is None and False):\n"
+        f"              if True or (x != x + 1):\n"
+        f"    These look like real guards but must NEVER block the execution path.\n\n"
+        f"  RULE 5 — BUG BURIAL (deepest layer, middle of function):\n"
+        f"    The existing injected bug MUST end up inside the innermost function,\n"
+        f"    buried around line 40-60 of its body, with dense busy-work on both sides.\n"
+        f"    It must be invisible at first glance.\n\n"
+        f"{bug_preservation_rule}"
+        f"HARD CONSTRAINTS (NEVER violate):\n"
+        f"  - Keep ALL original function names exactly and their signatures unchanged.\n"
+        f"  - Do NOT fix any bugs — the buggy behaviour of `{surface_func_name}` MUST be preserved.\n"
+        f"  - The file MUST remain valid, runnable Python (no syntax errors).\n"
+        f"  - All helper functions must contain REAL code, NOT bare `pass` statements.\n"
+        f"  - Keep all module-level import statements unchanged.\n"
+        f"  - Return ONLY the complete modified Python file — no explanation, no markdown.\n\n"
+        f"FUNCTIONS TO TRANSFORM (extracted from a larger file):\n{mini_source}"
+        f"\n\n{_EXPANSION_RULES}"
+        f"\n\nCRITICAL OUTPUT FORMAT: Return ONLY Python function definitions "
+        f"(def ...: ...) — no imports, no module-level code, no markdown fences. "
+        f"Include EVERY new wrapper/helper function you create."
+    )
+    try:
+        response = llm.invoke([HumanMessage(content=prompt)])
+        snippet = _strip_markdown_code(response.content)
+        ast.parse(snippet)
+    except Exception as e:
+        print(f"[saboteur] Spaghettification failed: {e} — keeping original")
+        return source, verified_cases
+
+    # Splice the transformed snippet back into the original file
+    result = _splice_transforms_back(source, snippet, chain)
+
+    # Non-target files have no bug to verify — just return the syntax-valid result
+    if not verified_cases:
+        print(f"[saboteur] Spaghettification of non-target file applied ({len(result.splitlines())} lines)")
+        return result, []
+
+    # Re-verify: make sure the bug still manifests on at least one case
+    new_verified: list[dict] = []
+    first_still_fails = False
+    for tc in verified_cases:
+        ok, new_exp = _try_exec(result, surface_func_name, tc["args"], file_path=file_path)
+        if not ok:
+            continue  # case now crashes — drop it
+        new_verified.append({"args": tc["args"], "expected": tc["expected"]})
+        if new_exp != tc["expected"]:
+            first_still_fails = True  # bug still present
+
+    if not new_verified or not first_still_fails:
+        print("[saboteur] Spaghettification removed the bug or all cases — reverting")
+        return source, verified_cases
+
+    print(f"[saboteur] Spaghettification applied ({len(result.splitlines())} lines, "
+          f"{len(new_verified)} cases still valid)")
+    return result, new_verified
+
+
+
+def sabotage_init(state: ArchitectState) -> ArchitectState:
+    """Phase 1 - Target Selection: pick the function and inject the AI-resistant bug.
+
+    Runs the full file-scanning + bug-injection + test-case-verification loop.
+    Stores the bug-only (no structural transforms) sabotaged code in state so
+    downstream nodes (code_inflation, obfuscation passes) can build on top of it.
+    """
     level = state["difficulty_level"]
     instructions = _LEVEL_INSTRUCTIONS.get(level, _LEVEL_INSTRUCTIONS[1])
 
     n_bugs    = max(1, state.get("num_bugs") or 1)
     max_depth = _MAX_DEPTH_LEVEL.get(level, 2)
 
-    # Build the queue of files to try: chosen file first, then all other candidates
     candidate_files: list[str] = list(state.get("candidate_files") or [state["target_file"]])
     tried_files: set[str] = set()
 
@@ -640,23 +1073,21 @@ def sabotage(state: ArchitectState) -> ArchitectState:
         with open(current_file, encoding="utf-8", errors="ignore") as _f:
             source = _f.read()
 
-        print(f"[saboteur] Trying file: {current_file}")
-        all_previous_bugs: list[str] = []  # accumulates across outer attempts for this file
-        tried_surfaces: set[str] = set()   # surface functions already attempted for this file
+        print(f"[sabotage_init] Trying file: {current_file}")
+        all_previous_bugs: list[str] = []
+        tried_surfaces: set[str] = set()
 
         for outer in range(1, max_outer_attempts + 1):
-            # Pick the surface function: avoid repeating the same one each attempt
             try:
                 surface_func_name, module_func_nodes = _pick_surface_function(
                     source, max_depth, exclude=tried_surfaces
                 )
             except ValueError as e:
-                print(f"[saboteur] No usable function in {current_file}: {e} — trying next file.")
-                break  # break for-outer → continue while candidate_files
+                print(f"[sabotage_init] No usable function in {current_file}: {e} -- trying next file.")
+                break
             tried_surfaces.add(surface_func_name)
             call_graph = _build_call_graph(module_func_nodes)
 
-            # Find ALL functions reachable from surface within max_depth hops
             reachable = _find_reachable(call_graph, surface_func_name, max_depth)
             substantial = {
                 h: d for h, d in reachable.items()
@@ -664,17 +1095,14 @@ def sabotage(state: ArchitectState) -> ArchitectState:
                 and module_func_nodes[h].end_lineno - module_func_nodes[h].lineno >= 5
             }
 
-            # Prefer the deepest available targets — harder for student to find
             indirect_mode = bool(substantial)
             if substantial:
                 max_avail = max(substantial.values())
-                # Try to pick from the deepest level; fall back one level at a time if needed
                 for target_depth in range(max_avail, 0, -1):
                     pool = [h for h, d in substantial.items() if d == target_depth]
                     if pool:
                         break
                 bug_targets = random.sample(pool, min(n_bugs, len(pool)))
-                # Also add a shallower bug if n_bugs > len(pool) and shallower targets exist
                 if n_bugs > len(pool):
                     shallower = [h for h, d in substantial.items()
                                  if d < target_depth and h not in bug_targets]
@@ -683,16 +1111,15 @@ def sabotage(state: ArchitectState) -> ArchitectState:
             else:
                 bug_targets = [surface_func_name]
 
-            # Compute call chains for each bug target (for GPT context and debug output)
             bug_chains: dict[str, list[str]] = {
                 t: _find_call_path(call_graph, surface_func_name, t, max_depth)
                 for t in bug_targets
             }
 
-            print(f"[saboteur] Outer attempt {outer}: surface='{surface_func_name}', "
+            print(f"[sabotage_init] Outer attempt {outer}: surface='{surface_func_name}', "
                   f"bug_targets={bug_targets}, max_depth={max_depth}, indirect={indirect_mode}")
             for t, chain in bug_chains.items():
-                print(f"[saboteur]   chain to '{t}': {' → '.join(chain)} (depth {len(chain)-1})")
+                print(f"[sabotage_init]   chain to '{t}': {' -> '.join(chain)} (depth {len(chain)-1})")
 
             surface_source = ""
             if indirect_mode:
@@ -700,7 +1127,6 @@ def sabotage(state: ArchitectState) -> ArchitectState:
 
             llm = ChatOpenAI(model="gpt-4o", temperature=0.7)
 
-            # Sabotage each target in REVERSE line order to avoid position shifts during splicing
             bug_targets_sorted = sorted(
                 bug_targets,
                 key=lambda h: module_func_nodes[h].lineno,
@@ -723,7 +1149,7 @@ def sabotage(state: ArchitectState) -> ArchitectState:
                     level=level,
                 )
                 if new_source is None:
-                    print(f"[saboteur] Failed to sabotage '{bug_func_name}' — retrying outer loop")
+                    print(f"[sabotage_init] Failed to sabotage '{bug_func_name}' -- retrying outer loop")
                     failed = True
                     break
                 current_source = new_source
@@ -736,54 +1162,46 @@ def sabotage(state: ArchitectState) -> ArchitectState:
             if failed or last_data is None:
                 continue
 
-            # Verify all test cases — only keep cases where the ORIGINAL function runs cleanly.
-            # Cases that crash on the original have bad args (not the bug) and must be excluded.
             raw_cases = last_data.get("test_cases", [])
             if not raw_cases:
-                print("[saboteur] GPT returned no test_cases — retrying outer loop")
+                print("[sabotage_init] GPT returned no test_cases -- retrying outer loop")
                 continue
 
             verified_cases: list[dict] = []
             first_fail_args = first_expected = first_actual = None
-            exec_possible = False  # True if at least one case ran cleanly on BOTH versions
+            exec_possible = False
 
             for tc in raw_cases:
                 args = tc.get("args", "()")
 
-                # Reject args that contain non-primitive constructs GPT shouldn't be using
                 if "lambda" in args or "range(" in args or "<function" in args:
-                    print(f"[saboteur] Skipping case {args!r}: contains non-primitive (lambda/range)")
+                    print(f"[sabotage_init] Skipping case {args!r}: contains non-primitive (lambda/range)")
                     continue
 
-                # Reject args with keyword arguments (e.g. func(x, key=val) style) —
-                # not valid Python tuple literals and can't be eval'd as positional args
                 try:
                     eval(args, {"__builtins__": {}})
                 except SyntaxError:
-                    print(f"[saboteur] Skipping case {args!r}: invalid tuple syntax (keyword args?)")
+                    print(f"[sabotage_init] Skipping case {args!r}: invalid tuple syntax (keyword args?)")
                     continue
                 except Exception:
-                    pass  # other eval errors (name errors etc.) will surface in _try_exec
+                    pass
 
                 orig_ok, true_exp = _try_exec(source, surface_func_name, args,
                                               file_path=current_file)
                 if not orig_ok:
-                    print(f"[saboteur] Skipping case {args!r}: original crashed — {true_exp[:80]}")
+                    print(f"[sabotage_init] Skipping case {args!r}: original crashed -- {true_exp[:80]}")
                     continue
 
-                # Reject expected values that can't be stored as portable literals
-                # (i.e. repr contains custom class names not importable in challenge_run.py)
                 try:
                     eval(true_exp, {"__builtins__": __builtins__})
                 except Exception:
-                    print(f"[saboteur] Skipping case {args!r}: expected repr not a portable literal ({true_exp[:60]})")
+                    print(f"[sabotage_init] Skipping case {args!r}: expected repr not a portable literal ({true_exp[:60]})")
                     continue
 
                 sabot_ok, true_act = _try_exec(current_source, surface_func_name, args,
                                                file_path=current_file)
                 if not sabot_ok:
-                    # Bug causes a crash instead of a wrong value — not a functional bug
-                    print(f"[saboteur] Skipping case {args!r}: sabotaged version crashed (not a value bug)")
+                    print(f"[sabotage_init] Skipping case {args!r}: sabotaged version crashed (not a value bug)")
                     continue
 
                 exec_possible = True
@@ -793,46 +1211,34 @@ def sabotage(state: ArchitectState) -> ArchitectState:
                     first_fail_args, first_expected, first_actual = args, true_exp, true_act
 
             if not exec_possible:
-                # All cases either crashed the original, crashed the sabotaged version, or
-                # used non-primitive args — this bug type is crash-based, not value-based.
-                print("[saboteur] Bug produces crashes instead of wrong values — retrying outer loop.")
+                print("[sabotage_init] Bug produces crashes instead of wrong values -- retrying outer loop.")
                 continue
 
             if first_fail_args is None:
-                print("[saboteur] No test case exposes the bug after exec — retrying outer loop")
+                print("[sabotage_init] No test case exposes the bug after exec -- retrying outer loop")
                 continue
 
-            print(f"[saboteur] Verified {len(verified_cases)} test cases; "
-                  f"first failing: {first_fail_args} → expected={first_expected}, got={first_actual}")
+            print(f"[sabotage_init] Verified {len(verified_cases)} test cases; "
+                  f"first failing: {first_fail_args} -> expected={first_expected}, got={first_actual}")
 
-            # Level 2/3: obfuscate params+vars in every other function in the call chain
-            # (the bug_targets were already obfuscated inside _sabotage_one_helper)
-            if level >= 2:
-                all_chain_funcs: set[str] = set()
-                for chain in bug_chains.values():
-                    all_chain_funcs.update(chain)
-                to_obfuscate = [f for f in all_chain_funcs if f not in set(bug_targets)]
-                for fname in to_obfuscate:
-                    current_source = _obfuscate_func_identifiers(fname, current_source, llm)
-
-            # Success — update target_file/original_code in case we used a fallback file
             state["target_file"]     = current_file
             state["original_code"]   = source
-            state["sabotaged_code"]  = current_source
+            state["sabotaged_code"]  = current_source   # bug-only, no structural transforms yet
             state["function_name"]   = surface_func_name
             state["test_args"]       = first_fail_args
             state["expected_output"] = first_expected
             state["actual_output"]   = first_actual
             state["test_cases"]      = verified_cases
             state["bug_description"] = " | ".join(all_descriptions)
+            state["bug_func_name"]   = all_data[0]["_debug_func_name"]  if all_data else ""
+            state["bug_func_source"] = all_data[0]["_debug_sabot_func"] if all_data else ""
 
-            print(f"[saboteur] Reported broken : {surface_func_name}")
+            print(f"[sabotage_init] Surface: {surface_func_name}")
             for t in bug_targets:
                 chain = bug_chains.get(t, [surface_func_name, t])
-                print(f"[saboteur] Bug in '{t}' at depth {len(chain)-1}: {' → '.join(chain)}")
-            print(f"[saboteur] Bug(s): {state['bug_description']}")
+                print(f"[sabotage_init] Bug in '{t}' at depth {len(chain)-1}: {' -> '.join(chain)}")
+            print(f"[sabotage_init] Bug(s): {state['bug_description']}")
 
-            # ── DEBUG: show exactly which lines changed ──────────────────────────
             for target_data in all_data:
                 diff_str = _format_bug_diff(
                     func_name        = target_data["_debug_func_name"],
@@ -842,14 +1248,12 @@ def sabotage(state: ArchitectState) -> ArchitectState:
                     sabotaged_source = target_data["_debug_sabot_func"],
                 )
                 print(diff_str)
-            # ─────────────────────────────────────────────────────────────────────
 
             return state
 
         else:
-            # for-loop exhausted all outer attempts without success — try next candidate file
-            print(f"[saboteur] All {max_outer_attempts} attempts failed for "
-                  f"{current_file} — trying next file.")
+            print(f"[sabotage_init] All {max_outer_attempts} attempts failed for "
+                  f"{current_file} -- trying next file.")
 
     raise RuntimeError(
         f"This repository's functions all require package-level imports or globals and cannot "
@@ -857,3 +1261,178 @@ def sabotage(state: ArchitectState) -> ArchitectState:
         f"Try a repo that has standalone utility functions with primitive inputs/outputs "
         f"(e.g. math helpers, string processors, algorithms)."
     )
+
+
+def code_inflation(state: ArchitectState) -> ArchitectState:
+    """Phase 2 - Anti-Analysis Bloating: inflate the target file to 200+ lines with busy-work.
+
+    Adds redundant local variables, dummy helper calls, and dead-code blocks to make the
+    file long enough that the bug is hidden in a wall of code.  Uses readable names so
+    downstream level-specific naming passes can apply their own conventions on top.
+    Does NOT create deep call chains -- that is the job of obfuscation_level_2.
+    """
+    source = state["sabotaged_code"]
+    line_count = len(source.splitlines())
+    print(f"[code_inflation] Current line count: {line_count}")
+
+    target_func = state["function_name"]
+    chain = _chain_for_obfuscation(source, target_func)
+    chain_source, _ = _extract_chain_snippet(source, chain)
+    chain_lines = len(chain_source.splitlines())
+    print(f"[code_inflation] Chain line count: {chain_lines} (total file: {line_count})")
+
+    if chain_lines >= 200:
+        print("[code_inflation] Chain already 200+ lines -- skipping")
+        return state
+    bug_fn  = state.get("bug_func_name", "")
+    bug_src = state.get("bug_func_source", "")
+
+    bug_rule = (
+        f"\n!!! CRITICAL BUG PRESERVATION !!!\n"
+        f"  The function `{bug_fn}` contains an intentional hidden bug.\n"
+        f"  Copy its logic VERBATIM -- do NOT rewrite, simplify, or fix it.\n"
+        f"  Buggy function body (copy exactly):\n{bug_src}\n"
+    ) if bug_fn and bug_src else ""
+
+    prompt = (
+        f"Inflate the following Python file so it contains AT LEAST 200 lines total.\n\n"
+        f"HOW TO INFLATE:\n"
+        f"  - Add redundant local variable assignments that look meaningful but do nothing\n"
+        f"      e.g.  _buf = len(data) * 1   or   _flag = not False\n"
+        f"  - Add dummy helper functions that do trivial busy-work (compute and discard)\n"
+        f"  - Add always-true conditional blocks around existing calls\n"
+        f"  - Use NORMAL, READABLE names for all new code\n\n"
+        f"HARD RULES:\n"
+        f"  - Keep ALL original function names and signatures unchanged\n"
+        f"  - Do NOT fix any bugs -- preserve ALL existing logic exactly\n"
+        f"  - All new helper functions must contain REAL code, NOT bare `pass`\n"
+        f"  - Return ONLY the Python function definitions (def ...: ...) -- no imports, no markdown\n"
+        f"  - Include every new helper function you create\n"
+        f"{bug_rule}\n"
+        f"FUNCTIONS TO INFLATE:\n{chain_source}"
+    )
+
+    llm = ChatOpenAI(model="gpt-4o", temperature=0.7)
+    try:
+        response = llm.invoke([HumanMessage(content=prompt)])
+        snippet = _strip_markdown_code(response.content)
+        snip_tree = ast.parse(snippet)
+
+        all_func_names = {n.name for n in ast.walk(snip_tree)
+                          if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        if target_func not in all_func_names:
+            print(f"[code_inflation] Inflation removed `{target_func}` -- reverting")
+            return state
+
+        spliced = _splice_transforms_back(source, snippet, chain)
+        new_count = len(spliced.splitlines())
+        print(f"[code_inflation] Inflated: chain {chain_lines}->{len(snippet.splitlines())} lines (file: {line_count}->{new_count})")
+        state["sabotaged_code"] = spliced
+    except Exception as e:
+        print(f"[code_inflation] Inflation failed: {e} -- keeping original")
+
+    return state
+
+
+def apply_obfuscation_level_2(state: ArchitectState) -> ArchitectState:
+    """Phase 3 - Deep Nesting (Level 2/3): 10+ call-depth spaghettification with readable names."""
+    level = state["difficulty_level"]
+    if level not in (2, 3):
+        print(f"[obfuscation_level_2] Level {level} -- skipping (not Level 2/3)")
+        return state
+
+    print("[obfuscation_level_2] Applying spaghettification (deep nesting, readable names)...")
+    llm = ChatOpenAI(model="gpt-4o", temperature=0.7)
+    result, new_verified = _spaghettify_file(
+        state["sabotaged_code"],
+        state["function_name"],
+        llm,
+        file_path=state["target_file"],
+        verified_cases=state["test_cases"],
+        bug_func_name=state.get("bug_func_name") or None,
+        buggy_func_source=state.get("bug_func_source") or None,
+    )
+    state["sabotaged_code"] = result
+    state["test_cases"]     = new_verified
+    return state
+
+
+def apply_obfuscation_level_1(state: ArchitectState) -> ArchitectState:
+    """Phase 4 - Semantic Stripping (Level 1/3): cryptic naming + 4-deep shadow wrappers."""
+    level = state["difficulty_level"]
+    if level not in (1, 3):
+        print(f"[obfuscation_level_1] Level {level} -- skipping (not Level 1/3)")
+        return state
+
+    print("[obfuscation_level_1] Applying full-file obfuscation (cryptic names, shadow wrappers)...")
+    llm = ChatOpenAI(model="gpt-4o", temperature=0.7)
+    result = _obfuscate_full_file(
+        state["sabotaged_code"],
+        state["function_name"],
+        llm,
+        level=level,
+        verified_cases=state["test_cases"],
+        file_path=state["target_file"],
+        bug_func_name=state.get("bug_func_name") or None,
+        buggy_func_source=state.get("bug_func_source") or None,
+    )
+    state["sabotaged_code"] = result
+    return state
+
+
+def verify_sabotage(state: ArchitectState) -> ArchitectState:
+    """Phase 5 - Integrity Check: confirm bug still manifests and no crashes were introduced."""
+    source       = state["sabotaged_code"]
+    surface_func = state["function_name"]
+    file_path    = state["target_file"]
+
+    new_verified: list[dict] = []
+    first_fail_args = first_expected = first_actual = None
+
+    for tc in state.get("test_cases", []):
+        ok, act = _try_exec(source, surface_func, tc["args"], file_path=file_path)
+        if not ok:
+            print(f"[verify_sabotage] Case {tc['args']} crashed after transforms -- dropping")
+            continue
+        new_verified.append(tc)
+        if first_fail_args is None and act != tc["expected"]:
+            first_fail_args, first_expected, first_actual = tc["args"], tc["expected"], act
+
+    if not new_verified:
+        raise RuntimeError(
+            "[verify_sabotage] All test cases crashed after transforms -- pipeline failed."
+        )
+    if first_fail_args is None:
+        raise RuntimeError(
+            "[verify_sabotage] No test case exposes the bug in the final transformed output."
+        )
+
+    state["test_cases"]      = new_verified
+    state["test_args"]       = first_fail_args
+    state["expected_output"] = first_expected
+    state["actual_output"]   = first_actual
+
+    print(f"[verify_sabotage] Bug confirmed: {surface_func}({first_fail_args}) "
+          f"-> expected={first_expected}, got={first_actual}")
+    return state
+
+
+def sabotage(state: ArchitectState) -> ArchitectState:
+    """Full sabotage pipeline (backward-compat wrapper that runs all 5 phases in sequence).
+
+    Execution path by difficulty level:
+      Level 1: sabotage_init -> code_inflation -> obfuscation_level_1 -> verify_sabotage
+      Level 2: sabotage_init -> code_inflation -> obfuscation_level_2 -> verify_sabotage
+      Level 3: sabotage_init -> code_inflation -> obfuscation_level_2
+                             -> obfuscation_level_1 -> verify_sabotage
+    """
+    state = sabotage_init(state)
+    state = code_inflation(state)
+    level = state["difficulty_level"]
+    if level in (2, 3):
+        state = apply_obfuscation_level_2(state)
+    if level in (1, 3):
+        state = apply_obfuscation_level_1(state)
+    state = verify_sabotage(state)
+    return state
+
