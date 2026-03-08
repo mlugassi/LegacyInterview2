@@ -4,10 +4,12 @@ Student Interface — Gradio GUI for the Legacy Code Challenge.
 Two-page flow:
   Page 1 (Setup):     student name, GitHub URL, difficulty level, num-bugs → Start
   Page 2 (Challenge): README, Code Editor, Test runner + AI Assistant sidebar
+  Page 3 (Results):   Score breakdown, diffs, test results, hints review
 """
 
 from __future__ import annotations
 
+import difflib
 import json
 from datetime import datetime
 from pathlib import Path
@@ -189,6 +191,11 @@ footer svg { display: inline !important; }
 
 /* Tab content */
 .left-tabs .tabitem { overflow-y: auto !important; max-height: 80vh !important; }
+
+/* Results diff blocks */
+.diff-block { font-family: monospace; font-size: 0.85em; padding: 12px;
+              border-radius: 8px; overflow-y: auto; max-height: 45vh;
+              white-space: pre; background: #1e1e1e; color: #d4d4d4; }
 """
 
 
@@ -219,13 +226,118 @@ def _colorise_test_output(raw: str) -> str:
     )
 
 
+def _diff_html(a: str, b: str, from_label: str, to_label: str) -> str:
+    """Generate coloured unified-diff HTML between two code strings."""
+    a_lines = a.splitlines(keepends=True)
+    b_lines = b.splitlines(keepends=True)
+    diff = list(difflib.unified_diff(a_lines, b_lines,
+                                     fromfile=from_label, tofile=to_label, lineterm=""))
+    if not diff:
+        return '<div class="diff-block" style="color:#22c55e;">No changes detected.</div>'
+
+    html_lines = []
+    for line in diff:
+        # Escape HTML
+        escaped = line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        if line.startswith("+++") or line.startswith("---"):
+            html_lines.append(f'<span style="color:#888;font-style:italic;">{escaped}</span>')
+        elif line.startswith("@@"):
+            html_lines.append(f'<span style="color:#60a5fa;">{escaped}</span>')
+        elif line.startswith("+"):
+            html_lines.append(f'<span style="color:#22c55e;background:#052e16;">{escaped}</span>')
+        elif line.startswith("-"):
+            html_lines.append(f'<span style="color:#ef4444;background:#2d0a0a;">{escaped}</span>')
+        else:
+            html_lines.append(f'<span style="color:#d4d4d4;">{escaped}</span>')
+
+    return (
+        '<div class="diff-block">'
+        + "\n".join(html_lines)
+        + "</div>"
+    )
+
+
+def _hints_html(history: list) -> str:
+    """Render the hint conversation history as HTML."""
+    if not history:
+        return "<p style='color:#888;font-style:italic;'>No hints were used.</p>"
+
+    parts = []
+    for entry in history:
+        if isinstance(entry, dict):
+            role    = entry.get("role", "")
+            content = entry.get("content", "")
+        else:
+            # Legacy tuple format
+            role, content = ("user", entry[0]) if entry[0] else ("assistant", entry[1])
+
+        escaped = content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        if role == "user":
+            parts.append(
+                f'<div style="margin:6px 0;padding:8px 12px;background:#1e3a5f;'
+                f'border-radius:6px;color:#93c5fd;">'
+                f'<strong>You:</strong> {escaped}</div>'
+            )
+        elif role == "assistant":
+            parts.append(
+                f'<div style="margin:6px 0;padding:8px 12px;background:#1a2e1a;'
+                f'border-radius:6px;color:#86efac;">'
+                f'<strong>AI:</strong> {escaped}</div>'
+            )
+
+    return (
+        '<div style="max-height:50vh;overflow-y:auto;padding:4px;">'
+        + "".join(parts)
+        + "</div>"
+    )
+
+
+def _score_summary_html(result: dict) -> str:
+    """Build a prominent score summary block."""
+    total   = result["total_score"]
+    tests   = result["test_score"]
+    diff    = result["diff_score"]
+    penalty = result["hint_penalty"]
+    passed  = result["passed"]
+    ttl     = result["total_tests"]
+    all_ok  = result["all_passed"]
+
+    color   = "#22c55e" if all_ok else ("#f59e0b" if total >= 50 else "#ef4444")
+    badge   = "🎉 ALL TESTS PASS!" if all_ok else ("⚠️ Partial" if total > 0 else "❌ Failed")
+
+    return f"""
+<div style="padding:20px;border-radius:12px;background:#1e1e1e;border:2px solid {color};">
+  <div style="font-size:2.5em;font-weight:bold;color:{color};text-align:center;">{total}/100</div>
+  <div style="text-align:center;color:{color};font-size:1.1em;margin-bottom:16px;">{badge}</div>
+  <table style="width:100%;border-collapse:collapse;font-family:monospace;">
+    <tr>
+      <td style="padding:6px 12px;color:#d4d4d4;">🧪 Test Score</td>
+      <td style="padding:6px 12px;color:#22c55e;text-align:right;font-weight:bold;">{tests}/80</td>
+      <td style="padding:6px 12px;color:#888;">({passed}/{ttl} cases passed)</td>
+    </tr>
+    <tr>
+      <td style="padding:6px 12px;color:#d4d4d4;">📐 Diff Score</td>
+      <td style="padding:6px 12px;color:#60a5fa;text-align:right;font-weight:bold;">{diff}/20</td>
+      <td style="padding:6px 12px;color:#888;">(similarity to original)</td>
+    </tr>
+    <tr>
+      <td style="padding:6px 12px;color:#d4d4d4;">💡 Hint Penalty</td>
+      <td style="padding:6px 12px;color:#f87171;text-align:right;font-weight:bold;">−{penalty}</td>
+      <td style="padding:6px 12px;color:#888;"></td>
+    </tr>
+  </table>
+</div>
+"""
+
+
 # ── Full two-page interface ───────────────────────────────────────────────────
 
 def create_full_interface() -> gr.Blocks:
     """
-    Returns a Gradio app with two logical pages:
+    Returns a Gradio app with three logical pages:
       Page 1: Setup form (name / URL / level / bugs)
       Page 2: Challenge interface (shown after pipeline finishes)
+      Page 3: Results (shown after Submit)
     """
 
     with gr.Blocks(title="Legacy Code Challenge") as demo:
@@ -291,7 +403,7 @@ def create_full_interface() -> gr.Blocks:
                             file_dropdown = gr.Dropdown(
                                 choices=[],
                                 label="File",
-                                info="Select a file to view; only the target file is editable.",
+                                info="Select a file to view. Submit saves your changes to the target file.",
                             )
                             code_editor = gr.Code(
                                 value="",
@@ -313,7 +425,11 @@ def create_full_interface() -> gr.Blocks:
                 # ── Right column: AI assistant + submit ───────────────────
                 with gr.Column(scale=2, elem_classes=["right-col"]):
                     hint_counter = gr.Markdown(_hint_md(0, 0))
-                    chatbot = gr.Chatbot(label="AI Assistant", elem_id="ai-chatbot")
+                    chatbot = gr.Chatbot(
+                        label="AI Assistant",
+                        elem_id="ai-chatbot",
+                        type="messages",
+                    )
                     with gr.Row():
                         chat_input = gr.Textbox(
                             placeholder="Ask the AI assistant for a hint…",
@@ -324,13 +440,34 @@ def create_full_interface() -> gr.Blocks:
 
                     gr.Markdown("---")
 
-                    with gr.Accordion("📊 Results", open=True, visible=False) as results_accordion:
-                        score_box  = gr.Textbox(label="Score",       interactive=False, lines=2)
-                        result_box = gr.Textbox(label="Test Output", interactive=False, lines=5)
-
                     with gr.Row():
                         submit_btn = gr.Button("🚀 Submit Fix", variant="primary", scale=2)
                         reset_btn  = gr.Button("↩️ Reset", scale=1)
+
+        # ════════════════════════════════════════════════════════════════════
+        # PAGE 3 — Results (hidden until Submit clicked)
+        # ════════════════════════════════════════════════════════════════════
+        with gr.Column(visible=False) as results_page:
+            with gr.Row():
+                gr.Markdown("## 📊 Submission Results")
+                back_btn = gr.Button("← Back to Editor", variant="secondary", scale=0)
+
+            score_summary_html = gr.HTML("")
+
+            with gr.Tabs():
+                with gr.Tab("🧪 Test Results"):
+                    results_test_html = gr.HTML("")
+
+                with gr.Tab("✏️ Your Changes"):
+                    gr.Markdown("_Diff: your submitted code vs the original buggy code you received_")
+                    results_your_diff_html = gr.HTML("")
+
+                with gr.Tab("🔍 Expected Fix"):
+                    gr.Markdown("_Diff: what the original correct code looks like vs the buggy version_")
+                    results_expected_diff_html = gr.HTML("")
+
+                with gr.Tab("💡 Hints Used"):
+                    results_hints_html = gr.HTML("")
 
         # ── Setup callback ─────────────────────────────────────────────────
 
@@ -368,7 +505,7 @@ def create_full_interface() -> gr.Blocks:
                     gr.update(value=f"### 🐛 Legacy Code Challenge &nbsp;|&nbsp; Level {level}{suffix}"),
                     gr.update(value=cs.readme()),
                     gr.update(choices=py_files, value=default),
-                    gr.update(value=cs.read_target(), label=cs.target_file),
+                    gr.update(value=cs.read_target(), label=cs.target_file, interactive=True),
                     workspace_path,             # workspace_state
                 )
 
@@ -403,9 +540,8 @@ def create_full_interface() -> gr.Blocks:
             if not workspace_path:
                 return gr.update()
             cs = ChallengeState(workspace_path)
-            content   = cs.read_py_file(rel_path)
-            is_target = (rel_path == cs.target_file)
-            return gr.update(value=content, interactive=is_target, label=rel_path)
+            content = cs.read_py_file(rel_path)
+            return gr.update(value=content, interactive=True, label=rel_path)
 
         def on_run_tests(workspace_path):
             if not workspace_path:
@@ -415,9 +551,13 @@ def create_full_interface() -> gr.Blocks:
             raw = r["output"] if r["output"] else "No output."
             return _colorise_test_output(raw)
 
-        def on_submit(code, hints_used, submit_count, workspace_path):
+        def on_submit(code, hints_used, submit_count, workspace_path, history):
             if not workspace_path:
-                return gr.update(), "No challenge loaded.", "", submit_count
+                return (
+                    gr.update(), gr.update(),  # challenge_page, results_page
+                    "", "", "", "", "",         # score, your_diff, expected_diff, test_html, hints_html
+                    submit_count,
+                )
             cs  = ChallengeState(workspace_path)
             log = SubmissionLog(cs.workspace)
             cs.write_target(code)
@@ -429,23 +569,30 @@ def create_full_interface() -> gr.Blocks:
                 hints_used=hints_used,
             )
             log.save(code, result, hints_used)
-            new_count  = submit_count + 1
-            score_text = (
-                f"Total: {result['total_score']}/100  |  "
-                f"Tests: {result['test_score']}/80 ({result['passed']}/{result['total_tests']} passed)  |  "
-                f"Diff: {result['diff_score']}/20  |  "
-                f"Hints: −{result['hint_penalty']} pts"
-            )
-            if result["all_passed"]:
-                score_text = "🎉 ALL TESTS PASS!  " + score_text
-            if not result["correct_location"] and result["test_score"] < 80:
-                score_text += "  ⚠️ Wrong function?"
+            new_count = submit_count + 1
+
+            # Build results page content
+            score_html    = _score_summary_html(result)
+            your_diff     = _diff_html(cs.sabotaged_code, code,
+                                       "buggy (original)", "your fix")
+            expected_diff = _diff_html(cs.sabotaged_code, cs.original_code,
+                                       "buggy (original)", "correct original")
+            test_html     = _colorise_test_output(result["test_output"] or "No test output.")
+            hints_html    = _hints_html(history or [])
+
             return (
-                gr.Accordion(open=True, visible=True),
-                score_text,
-                result["test_output"],
+                gr.update(visible=False),   # challenge_page
+                gr.update(visible=True),    # results_page
+                score_html,
+                your_diff,
+                expected_diff,
+                test_html,
+                hints_html,
                 new_count,
             )
+
+        def on_back(_workspace_path):
+            return gr.update(visible=True), gr.update(visible=False)
 
         def on_reset(workspace_path):
             if not workspace_path:
@@ -459,7 +606,11 @@ def create_full_interface() -> gr.Blocks:
                 penalty = PENALTY_TABLE[min(hints_used, len(PENALTY_TABLE) - 1)]
                 return history, "", hints_used, _hint_md(hints_used, penalty)
             if not workspace_path:
-                return history + [[message, "No challenge loaded yet."]], "", hints_used, _hint_md(hints_used, 0)
+                history = list(history or []) + [
+                    {"role": "user",      "content": message},
+                    {"role": "assistant", "content": "No challenge loaded yet."},
+                ]
+                return history, "", hints_used, _hint_md(hints_used, 0)
             cs = ChallengeState(workspace_path)
             response = get_hint(
                 user_message=message,
@@ -468,7 +619,7 @@ def create_full_interface() -> gr.Blocks:
                 submission_attempts=submit_count,
                 challenge_info=cs.challenge_info(),
             )
-            history   = list(history) + [
+            history   = list(history or []) + [
                 {"role": "user",      "content": message},
                 {"role": "assistant", "content": response},
             ]
@@ -484,8 +635,22 @@ def create_full_interface() -> gr.Blocks:
         run_tests_btn.click(on_run_tests, inputs=[workspace_state], outputs=[test_output])
         submit_btn.click(
             on_submit,
-            inputs=[code_editor, hints_used_state, submission_count_state, workspace_state],
-            outputs=[results_accordion, score_box, result_box, submission_count_state],
+            inputs=[code_editor, hints_used_state, submission_count_state,
+                    workspace_state, chatbot],
+            outputs=[
+                challenge_page, results_page,
+                score_summary_html,
+                results_your_diff_html,
+                results_expected_diff_html,
+                results_test_html,
+                results_hints_html,
+                submission_count_state,
+            ],
+        )
+        back_btn.click(
+            on_back,
+            inputs=[workspace_state],
+            outputs=[challenge_page, results_page],
         )
         reset_btn.click(on_reset, inputs=[workspace_state], outputs=[code_editor])
         send_btn.click(
@@ -502,7 +667,7 @@ def create_full_interface() -> gr.Blocks:
     return demo
 
 
-# ── Legacy entry point (used by orchestrator) ─────────────────────────────────
+# ── Legacy entry point (used by challenge.py CLI path) ───────────────────────
 
 def create_interface(workspace_path: str) -> gr.Blocks:
     """Build the challenge-only interface for a pre-existing workspace."""
@@ -523,42 +688,72 @@ def create_interface(workspace_path: str) -> gr.Blocks:
             elem_classes=["app-header"],
         )
 
-        with gr.Row(elem_classes=["main-row"]):
-            with gr.Column(scale=3, elem_classes=["left-col"]):
-                with gr.Tabs(elem_classes=["left-tabs"]):
-                    with gr.Tab("📋 Challenge"):
-                        gr.Markdown(cs.readme())
-                    with gr.Tab("💻 Code Editor"):
-                        file_dropdown = gr.Dropdown(choices=py_files, value=default_file, label="File")
-                        code_editor   = gr.Code(
-                            value=cs.read_target(), language="python", label=cs.target_file,
-                            interactive=True, lines=30, elem_id="code-editor",
-                        )
-                    with gr.Tab("🧪 Test"):
-                        gr.Markdown("Run `challenge_run.py` against your current saved code.")
-                        run_tests_btn = gr.Button("▶ Run Tests", variant="primary")
-                        test_output   = gr.HTML(
-                            "<p style='color:#888;font-family:monospace;'>Click 'Run Tests'…</p>"
-                        )
+        # ── Challenge page ────────────────────────────────────────────────
+        with gr.Column(visible=True) as challenge_col:
+            with gr.Row(elem_classes=["main-row"]):
+                with gr.Column(scale=3, elem_classes=["left-col"]):
+                    with gr.Tabs(elem_classes=["left-tabs"]):
+                        with gr.Tab("📋 Challenge"):
+                            gr.Markdown(cs.readme())
+                        with gr.Tab("💻 Code Editor"):
+                            file_dropdown = gr.Dropdown(
+                                choices=py_files, value=default_file, label="File",
+                                info="Select a file to view. Submit saves to the target file.",
+                            )
+                            code_editor   = gr.Code(
+                                value=cs.read_target(), language="python", label=cs.target_file,
+                                interactive=True, lines=30, elem_id="code-editor",
+                            )
+                        with gr.Tab("🧪 Test"):
+                            gr.Markdown("Run `challenge_run.py` against your current saved code.")
+                            run_tests_btn = gr.Button("▶ Run Tests", variant="primary")
+                            test_output   = gr.HTML(
+                                "<p style='color:#888;font-family:monospace;'>Click 'Run Tests'…</p>"
+                            )
 
-            with gr.Column(scale=2, elem_classes=["right-col"]):
-                hint_counter = gr.Markdown(_hint_md(0, 0))
-                chatbot = gr.Chatbot(label="AI Assistant", elem_id="ai-chatbot")
-                with gr.Row():
-                    chat_input = gr.Textbox(placeholder="Ask the AI assistant for a hint…", show_label=False, scale=5)
-                    send_btn   = gr.Button("Send", variant="secondary", scale=1)
-                gr.Markdown("---")
-                with gr.Accordion("📊 Results", open=True, visible=False) as results_accordion:
-                    score_box  = gr.Textbox(label="Score",       interactive=False, lines=2)
-                    result_box = gr.Textbox(label="Test Output", interactive=False, lines=5)
-                with gr.Row():
-                    submit_btn = gr.Button("🚀 Submit Fix", variant="primary", scale=2)
-                    reset_btn  = gr.Button("↩️ Reset", scale=1)
+                with gr.Column(scale=2, elem_classes=["right-col"]):
+                    hint_counter = gr.Markdown(_hint_md(0, 0))
+                    chatbot = gr.Chatbot(
+                        label="AI Assistant",
+                        elem_id="ai-chatbot",
+                        type="messages",
+                    )
+                    with gr.Row():
+                        chat_input = gr.Textbox(
+                            placeholder="Ask the AI assistant for a hint…",
+                            show_label=False, scale=5,
+                        )
+                        send_btn   = gr.Button("Send", variant="secondary", scale=1)
+                    gr.Markdown("---")
+                    with gr.Row():
+                        submit_btn = gr.Button("🚀 Submit Fix", variant="primary", scale=2)
+                        reset_btn  = gr.Button("↩️ Reset", scale=1)
+
+        # ── Results page ──────────────────────────────────────────────────
+        with gr.Column(visible=False) as results_col:
+            with gr.Row():
+                gr.Markdown("## 📊 Submission Results")
+                back_btn = gr.Button("← Back to Editor", variant="secondary", scale=0)
+
+            score_summary_html = gr.HTML("")
+
+            with gr.Tabs():
+                with gr.Tab("🧪 Test Results"):
+                    results_test_html = gr.HTML("")
+                with gr.Tab("✏️ Your Changes"):
+                    gr.Markdown("_Diff: your submitted code vs the original buggy code_")
+                    results_your_diff_html = gr.HTML("")
+                with gr.Tab("🔍 Expected Fix"):
+                    gr.Markdown("_Diff: what the correct original code looks like vs the buggy version_")
+                    results_expected_diff_html = gr.HTML("")
+                with gr.Tab("💡 Hints Used"):
+                    results_hints_html = gr.HTML("")
+
+        # ── Callbacks ─────────────────────────────────────────────────────
 
         def on_file_select(rel_path):
-            content   = cs.read_py_file(rel_path)
-            is_target = (rel_path == cs.target_file)
-            return gr.update(value=content, interactive=is_target, label=rel_path)
+            content = cs.read_py_file(rel_path)
+            return gr.update(value=content, interactive=True, label=rel_path)
 
         def on_run_tests():
             from orchestrator.scoring import run_tests
@@ -566,7 +761,7 @@ def create_interface(workspace_path: str) -> gr.Blocks:
             raw = r["output"] if r["output"] else "No output."
             return _colorise_test_output(raw)
 
-        def on_submit(code, hints_used, submit_count):
+        def on_submit(code, hints_used, submit_count, history):
             cs.write_target(code)
             result = evaluate_submission(
                 workspace_path=workspace_path,
@@ -576,17 +771,29 @@ def create_interface(workspace_path: str) -> gr.Blocks:
                 hints_used=hints_used,
             )
             log.save(code, result, hints_used)
-            new_count  = submit_count + 1
-            score_text = (
-                f"Total: {result['total_score']}/100  |  "
-                f"Tests: {result['test_score']}/80 ({result['passed']}/{result['total_tests']} passed)  |  "
-                f"Diff: {result['diff_score']}/20  |  Hints: −{result['hint_penalty']} pts"
+            new_count = submit_count + 1
+
+            score_html    = _score_summary_html(result)
+            your_diff     = _diff_html(cs.sabotaged_code, code,
+                                       "buggy (original)", "your fix")
+            expected_diff = _diff_html(cs.sabotaged_code, cs.original_code,
+                                       "buggy (original)", "correct original")
+            test_html     = _colorise_test_output(result["test_output"] or "No test output.")
+            hints_html    = _hints_html(history or [])
+
+            return (
+                gr.update(visible=False),   # challenge_col
+                gr.update(visible=True),    # results_col
+                score_html,
+                your_diff,
+                expected_diff,
+                test_html,
+                hints_html,
+                new_count,
             )
-            if result["all_passed"]:
-                score_text = "🎉 ALL TESTS PASS!  " + score_text
-            if not result["correct_location"] and result["test_score"] < 80:
-                score_text += "  ⚠️ Wrong function?"
-            return gr.Accordion(open=True, visible=True), score_text, result["test_output"], new_count
+
+        def on_back():
+            return gr.update(visible=True), gr.update(visible=False)
 
         def on_reset():
             cs.reset_target()
@@ -601,7 +808,7 @@ def create_interface(workspace_path: str) -> gr.Blocks:
                 hints_used=hints_used, submission_attempts=submit_count,
                 challenge_info=cs.challenge_info(),
             )
-            history   = list(history) + [
+            history   = list(history or []) + [
                 {"role": "user",      "content": message},
                 {"role": "assistant", "content": response},
             ]
@@ -613,9 +820,18 @@ def create_interface(workspace_path: str) -> gr.Blocks:
         run_tests_btn.click(on_run_tests, outputs=[test_output])
         submit_btn.click(
             on_submit,
-            inputs=[code_editor, hints_used_state, submission_count_state],
-            outputs=[results_accordion, score_box, result_box, submission_count_state],
+            inputs=[code_editor, hints_used_state, submission_count_state, chatbot],
+            outputs=[
+                challenge_col, results_col,
+                score_summary_html,
+                results_your_diff_html,
+                results_expected_diff_html,
+                results_test_html,
+                results_hints_html,
+                submission_count_state,
+            ],
         )
+        back_btn.click(on_back, outputs=[challenge_col, results_col])
         reset_btn.click(on_reset, outputs=[code_editor])
         send_btn.click(
             on_send,
