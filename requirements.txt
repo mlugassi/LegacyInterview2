@@ -4,3 +4,4 @@ langchain-core
 gitpython
 python-dotenv
 gradio
+pywebview

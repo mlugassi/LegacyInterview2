@@ -158,13 +158,22 @@ def get_hint(
     Returns:
         The assistant's hint as a string.
     """
-    # Convert Gradio history format to our message list
+    # Convert Gradio history to our message list.
+    # Gradio 6 uses dicts {"role": ..., "content": ...};
+    # older versions used [user, assistant] pairs — handle both.
     messages: list = []
-    for human, ai in history:
-        if human:
-            messages.append({"role": "user", "content": human})
-        if ai:
-            messages.append({"role": "assistant", "content": ai})
+    for entry in history:
+        if isinstance(entry, dict):
+            role    = entry.get("role", "")
+            content = entry.get("content", "")
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
+        else:
+            human, ai = entry
+            if human:
+                messages.append({"role": "user",      "content": human})
+            if ai:
+                messages.append({"role": "assistant", "content": ai})
     messages.append({"role": "user", "content": user_message})
 
     graph = build_hint_graph()

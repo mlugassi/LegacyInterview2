@@ -104,13 +104,15 @@ def node_launch_student_gui(state: OrchestratorState) -> OrchestratorState:
     print(f"\n[orchestrator] ── Step 3/3: Launching student GUI ─────────────────")
     print(f"[orchestrator] Opening http://localhost:{port} ...")
 
+    import gradio as gr
     interface = student_interface.create_interface(state["workspace_path"])
     interface.launch(
         server_name="127.0.0.1",
         server_port=port,
         share=share,
         inbrowser=True,
-        ssl_verify=False,
+        theme=gr.themes.Soft(),
+        css=student_interface._CSS,
     )
 
     return {**state, "launch_status": f"Launched on port {port}"}
