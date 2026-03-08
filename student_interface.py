@@ -165,7 +165,6 @@ def _run_pipeline(github_url: str, difficulty_level: int, num_bugs: int) -> str:
 PENALTY_TABLE = [0, 2, 6, 12, 20, 30]
 
 # Sets dark mode as the default on first visit.
-# The built-in Gradio toggle button (in the footer) lets users switch themes.
 _JS = """
 () => {
     if (!localStorage.getItem('gradio-theme')) {
@@ -175,7 +174,7 @@ _JS = """
 """
 
 _CSS = """
-/* Keep footer visible — it contains the built-in dark/light toggle button */
+/* Keep footer visible */
 footer svg { display: inline !important; }
 .gradio-container { max-width: 100% !important; }
 
@@ -183,8 +182,8 @@ footer svg { display: inline !important; }
 .setup-card { max-width: 700px; margin: 40px auto !important; }
 
 /* Code editor — scrollable */
-#code-editor .cm-scroller { overflow-y: auto !important; max-height: 62vh !important; }
-#code-editor .cm-editor   { max-height: 62vh !important; }
+#code-editor .cm-scroller { overflow-y: auto !important; max-height: 60vh !important; }
+#code-editor .cm-editor   { max-height: 60vh !important; }
 
 /* Chatbot */
 #ai-chatbot .wrap { height: 58vh !important; overflow-y: auto !important; }
@@ -198,10 +197,21 @@ footer svg { display: inline !important; }
               white-space: pre; background: #1e1e1e; color: #d4d4d4; }
 """
 
+_SEARCH_JS = (
+    "() => { "
+    "  const ed = document.querySelector('#code-editor .cm-editor'); "
+    "  if (ed) { "
+    "    ed.focus(); "
+    "    ed.dispatchEvent(new KeyboardEvent('keydown', "
+    "      {key:'f', ctrlKey:true, bubbles:true, cancelable:true})); "
+    "  } "
+    "}"
+)
+
 
 def _hint_md(hints_used: int, penalty: int) -> str:
     return (
-        f"🤖 **Assistant** &nbsp;|&nbsp; "
+        f"🤖 **AI Assistant** &nbsp;|&nbsp; "
         f"Hints used: **{hints_used}** &nbsp;|&nbsp; Penalty: **{penalty} pts** &nbsp; "
         f"_(−2 / −6 / −12 / −20 / −30)_"
     )
@@ -226,8 +236,15 @@ def _colorise_test_output(raw: str) -> str:
     )
 
 
+def _normalize(code: str) -> str:
+    """Strip trailing whitespace per line and normalize line endings."""
+    return "\n".join(line.rstrip() for line in code.replace("\r\n", "\n").replace("\r", "\n").splitlines())
+
+
 def _diff_html(a: str, b: str, from_label: str, to_label: str) -> str:
     """Generate coloured unified-diff HTML between two code strings."""
+    a = _normalize(a)
+    b = _normalize(b)
     a_lines = a.splitlines(keepends=True)
     b_lines = b.splitlines(keepends=True)
     diff = list(difflib.unified_diff(a_lines, b_lines,
@@ -237,7 +254,6 @@ def _diff_html(a: str, b: str, from_label: str, to_label: str) -> str:
 
     html_lines = []
     for line in diff:
-        # Escape HTML
         escaped = line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         if line.startswith("+++") or line.startswith("---"):
             html_lines.append(f'<span style="color:#888;font-style:italic;">{escaped}</span>')
@@ -257,6 +273,34 @@ def _diff_html(a: str, b: str, from_label: str, to_label: str) -> str:
     )
 
 
+def _extract_function_source(code: str, func_name: str) -> str:
+    """Extract a named function's source lines from code using ast."""
+    import ast
+    try:
+        tree = ast.parse(code)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name == func_name:
+                    lines = code.splitlines()
+                    return "\n".join(lines[node.lineno - 1 : node.end_lineno])
+    except Exception:
+        pass
+    return ""
+
+
+def _expected_fix_diff_html(cs: "ChallengeState") -> str:
+    """Diff only the bug function between sabotaged and original code."""
+    func = cs.bug_func_name
+    if func:
+        sabotaged_func = _extract_function_source(cs.sabotaged_code, func)
+        original_func  = _extract_function_source(cs.original_code,  func)
+        if sabotaged_func and original_func:
+            return _diff_html(sabotaged_func, original_func,
+                              f"{func} — buggy", f"{func} — original")
+    return _diff_html(cs.sabotaged_code, cs.original_code,
+                      "buggy (received)", "correct original")
+
+
 def _hints_html(history: list) -> str:
     """Render the hint conversation history as HTML."""
     if not history:
@@ -268,7 +312,6 @@ def _hints_html(history: list) -> str:
             role    = entry.get("role", "")
             content = entry.get("content", "")
         else:
-            # Legacy tuple format
             role, content = ("user", entry[0]) if entry[0] else ("assistant", entry[1])
 
         escaped = content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -394,17 +437,21 @@ def create_full_interface() -> gr.Blocks:
 
                 # ── Left column: tabs ─────────────────────────────────────
                 with gr.Column(scale=3, elem_classes=["left-col"]):
-                    with gr.Tabs(elem_classes=["left-tabs"]):
+                    with gr.Tabs(selected=0, elem_classes=["left-tabs"]) as left_tabs:
 
-                        with gr.Tab("📋 Challenge"):
+                        with gr.Tab("📋 Challenge", id=0):
                             challenge_readme = gr.Markdown("")
 
-                        with gr.Tab("💻 Code Editor"):
+                        with gr.Tab("💻 Code Editor", id=1):
                             file_dropdown = gr.Dropdown(
                                 choices=[],
                                 label="File",
-                                info="Select a file to view. Submit saves your changes to the target file.",
+                                info="Select a file to view. Submit saves to the target file.",
                             )
+                            with gr.Row():
+                                btn_tests   = gr.Button("▶ Run Tests",        variant="secondary")
+                                btn_changes = gr.Button("👁️ View My Changes", variant="secondary")
+                                search_btn  = gr.Button("🔍 Search (Ctrl+F)", variant="secondary", size="sm")
                             code_editor = gr.Code(
                                 value="",
                                 language="python",
@@ -413,14 +460,21 @@ def create_full_interface() -> gr.Blocks:
                                 lines=30,
                                 elem_id="code-editor",
                             )
+                            save_status = gr.Markdown("")
+                            save_btn = gr.Button("💾 Save", variant="secondary")
 
-                        with gr.Tab("🧪 Test"):
-                            gr.Markdown("Run `challenge_run.py` against your current saved code.")
-                            run_tests_btn = gr.Button("▶ Run Tests", variant="primary")
-                            test_output   = gr.HTML(
-                                "<p style='color:#888;font-family:monospace;'>"
-                                "Click 'Run Tests' to execute…</p>"
+                        with gr.Tab("🧪 Test Results", id=2):
+                            test_output = gr.HTML(
+                                "<p style='color:#888;font-family:monospace;'>Click '▶ Run Tests' to run…</p>"
                             )
+                            run_tests_tab_btn = gr.Button("▶ Run Tests", variant="secondary")
+
+                        with gr.Tab("👁️ My Changes", id=3):
+                            gr.Markdown("_Diff: your saved file vs the original buggy code you received_")
+                            changes_diff_html = gr.HTML("")
+                            with gr.Row():
+                                refresh_btn = gr.Button("🔄 Refresh", variant="secondary")
+                                revert_btn  = gr.Button("↩️ Revert to Original", variant="secondary")
 
                 # ── Right column: AI assistant + submit ───────────────────
                 with gr.Column(scale=2, elem_classes=["right-col"]):
@@ -428,7 +482,6 @@ def create_full_interface() -> gr.Blocks:
                     chatbot = gr.Chatbot(
                         label="AI Assistant",
                         elem_id="ai-chatbot",
-                        type="messages",
                     )
                     with gr.Row():
                         chat_input = gr.Textbox(
@@ -439,18 +492,13 @@ def create_full_interface() -> gr.Blocks:
                         send_btn = gr.Button("Send", variant="secondary", scale=1)
 
                     gr.Markdown("---")
-
-                    with gr.Row():
-                        submit_btn = gr.Button("🚀 Submit Fix", variant="primary", scale=2)
-                        reset_btn  = gr.Button("↩️ Reset", scale=1)
+                    submit_btn = gr.Button("🚀 Submit Fix", variant="primary")
 
         # ════════════════════════════════════════════════════════════════════
         # PAGE 3 — Results (hidden until Submit clicked)
         # ════════════════════════════════════════════════════════════════════
         with gr.Column(visible=False) as results_page:
-            with gr.Row():
-                gr.Markdown("## 📊 Submission Results")
-                back_btn = gr.Button("← Back to Editor", variant="secondary", scale=0)
+            gr.Markdown("## 📊 Submission Results")
 
             score_summary_html = gr.HTML("")
 
@@ -474,19 +522,18 @@ def create_full_interface() -> gr.Blocks:
         def on_start(name, url, level_str, num_bugs):
             level = int(str(level_str).strip()[0])
 
-            # Phase 1: show loading indicator
             yield (
                 gr.update(visible=True,
                           value="⏳ Cloning repository and generating challenge…"
-                                " this may take 1–2 minutes."),  # status_box
-                gr.update(interactive=False),   # start_btn
-                gr.update(),                    # setup_page
-                gr.update(),                    # challenge_page
-                gr.update(),                    # header_md
-                gr.update(),                    # challenge_readme
-                gr.update(),                    # file_dropdown
-                gr.update(),                    # code_editor
-                "",                             # workspace_state
+                                " this may take 1–2 minutes."),
+                gr.update(interactive=False),
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                "",
             )
 
             try:
@@ -496,29 +543,23 @@ def create_full_interface() -> gr.Blocks:
                 default  = cs.target_file if cs.target_file in py_files else (py_files[0] if py_files else "")
                 suffix   = f" &nbsp;|&nbsp; {name.strip()}" if name.strip() else ""
 
-                # Phase 2: switch to challenge page
                 yield (
-                    gr.update(visible=False),   # status_box
-                    gr.update(interactive=True), # start_btn
-                    gr.update(visible=False),    # setup_page
-                    gr.update(visible=True),     # challenge_page
+                    gr.update(visible=False),
+                    gr.update(interactive=True),
+                    gr.update(visible=False),
+                    gr.update(visible=True),
                     gr.update(value=f"### 🐛 Legacy Code Challenge &nbsp;|&nbsp; Level {level}{suffix}"),
                     gr.update(value=cs.readme()),
                     gr.update(choices=py_files, value=default),
                     gr.update(value=cs.read_target(), label=cs.target_file, interactive=True),
-                    workspace_path,             # workspace_state
+                    workspace_path,
                 )
 
             except Exception as exc:
                 yield (
                     gr.update(visible=True, value=f"❌ Error: {exc}"),
                     gr.update(interactive=True),
-                    gr.update(),
-                    gr.update(),
-                    gr.update(),
-                    gr.update(),
-                    gr.update(),
-                    gr.update(),
+                    gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
                     "",
                 )
 
@@ -543,24 +584,53 @@ def create_full_interface() -> gr.Blocks:
             content = cs.read_py_file(rel_path)
             return gr.update(value=content, interactive=True, label=rel_path)
 
-        def on_run_tests(workspace_path):
+        def on_save(code, workspace_path):
             if not workspace_path:
-                return "<p style='color:#888'>No challenge loaded.</p>"
+                return "⚠️ No challenge loaded."
+            cs = ChallengeState(workspace_path)
+            cs.write_target(code)
+            return "✅ Saved"
+
+        def on_run_tests(workspace_path):
+            loading = '<p style="text-align:center;padding:20px;color:#888;">⏳ Running tests…</p>'
+            yield (gr.update(selected=2), loading)
+            if not workspace_path:
+                yield (gr.update(selected=2), "<p style='color:#888'>No challenge loaded.</p>")
+                return
             from orchestrator.scoring import run_tests
             r   = run_tests(workspace_path)
             raw = r["output"] if r["output"] else "No output."
-            return _colorise_test_output(raw)
+            yield (gr.update(selected=2), _colorise_test_output(raw))
+
+        def on_show_changes(workspace_path):
+            if not workspace_path:
+                diff = "<p style='color:#888'>No challenge loaded.</p>"
+            else:
+                cs      = ChallengeState(workspace_path)
+                current = cs.read_target()
+                diff    = _diff_html(cs.sabotaged_code, current, "buggy (received)", "your saved code")
+            return (gr.update(selected=3), diff)
+
+        def on_revert(workspace_path):
+            if not workspace_path:
+                return gr.update(), gr.update(selected=1)
+            cs = ChallengeState(workspace_path)
+            cs.reset_target()
+            return cs.sabotaged_code, gr.update(selected=1)
 
         def on_submit(code, hints_used, submit_count, workspace_path, history):
+            _loading = '<p style="text-align:center;padding:40px;color:#888;font-size:1.2em;">⏳ Running tests…</p>'
+            yield (
+                gr.update(visible=False),
+                gr.update(visible=True),
+                _loading, "", "", "", "",
+                submit_count,
+            )
             if not workspace_path:
-                return (
-                    gr.update(), gr.update(),  # challenge_page, results_page
-                    "", "", "", "", "",         # score, your_diff, expected_diff, test_html, hints_html
-                    submit_count,
-                )
+                yield (gr.update(), gr.update(), "No challenge loaded.", "", "", "", "", submit_count)
+                return
             cs  = ChallengeState(workspace_path)
             log = SubmissionLog(cs.workspace)
-            cs.write_target(code)
             result = evaluate_submission(
                 workspace_path=workspace_path,
                 student_code=code,
@@ -571,35 +641,17 @@ def create_full_interface() -> gr.Blocks:
             log.save(code, result, hints_used)
             new_count = submit_count + 1
 
-            # Build results page content
             score_html    = _score_summary_html(result)
-            your_diff     = _diff_html(cs.sabotaged_code, code,
-                                       "buggy (original)", "your fix")
-            expected_diff = _diff_html(cs.sabotaged_code, cs.original_code,
-                                       "buggy (original)", "correct original")
+            your_diff     = _diff_html(cs.sabotaged_code, code, "buggy (received)", "your fix")
+            expected_diff = _expected_fix_diff_html(cs)
             test_html     = _colorise_test_output(result["test_output"] or "No test output.")
             hints_html    = _hints_html(history or [])
 
-            return (
-                gr.update(visible=False),   # challenge_page
-                gr.update(visible=True),    # results_page
-                score_html,
-                your_diff,
-                expected_diff,
-                test_html,
-                hints_html,
+            yield (
+                gr.update(), gr.update(),
+                score_html, your_diff, expected_diff, test_html, hints_html,
                 new_count,
             )
-
-        def on_back(_workspace_path):
-            return gr.update(visible=True), gr.update(visible=False)
-
-        def on_reset(workspace_path):
-            if not workspace_path:
-                return ""
-            cs = ChallengeState(workspace_path)
-            cs.reset_target()
-            return cs.sabotaged_code
 
         def on_send(message, history, hints_used, submit_count, workspace_path):
             if not message.strip():
@@ -612,27 +664,40 @@ def create_full_interface() -> gr.Blocks:
                 ]
                 return history, "", hints_used, _hint_md(hints_used, 0)
             cs = ChallengeState(workspace_path)
-            response = get_hint(
+            result = get_hint(
                 user_message=message,
                 history=history,
                 hints_used=hints_used,
                 submission_attempts=submit_count,
                 challenge_info=cs.challenge_info(),
             )
-            history   = list(history or []) + [
+            history = list(history or []) + [
                 {"role": "user",      "content": message},
-                {"role": "assistant", "content": response},
+                {"role": "assistant", "content": result["response"]},
             ]
-            new_hints = hints_used + 1
+            new_hints = hints_used + (1 if result["gave_hint"] else 0)
             penalty   = PENALTY_TABLE[min(new_hints, len(PENALTY_TABLE) - 1)]
             return history, "", new_hints, _hint_md(new_hints, penalty)
+
+        # ── Wiring ────────────────────────────────────────────────────────
+
+        search_btn.click(fn=None, js=_SEARCH_JS)
 
         file_dropdown.change(
             on_file_select,
             inputs=[file_dropdown, workspace_state],
             outputs=[code_editor],
         )
-        run_tests_btn.click(on_run_tests, inputs=[workspace_state], outputs=[test_output])
+        save_btn.click(on_save, inputs=[code_editor, workspace_state], outputs=[save_status])
+
+        btn_tests.click(on_run_tests, inputs=[workspace_state], outputs=[left_tabs, test_output])
+        run_tests_tab_btn.click(on_run_tests, inputs=[workspace_state], outputs=[left_tabs, test_output])
+
+        btn_changes.click(on_show_changes, inputs=[workspace_state], outputs=[left_tabs, changes_diff_html])
+        refresh_btn.click(on_show_changes, inputs=[workspace_state], outputs=[left_tabs, changes_diff_html])
+
+        revert_btn.click(on_revert, inputs=[workspace_state], outputs=[code_editor, left_tabs])
+
         submit_btn.click(
             on_submit,
             inputs=[code_editor, hints_used_state, submission_count_state,
@@ -647,12 +712,6 @@ def create_full_interface() -> gr.Blocks:
                 submission_count_state,
             ],
         )
-        back_btn.click(
-            on_back,
-            inputs=[workspace_state],
-            outputs=[challenge_page, results_page],
-        )
-        reset_btn.click(on_reset, inputs=[workspace_state], outputs=[code_editor])
         send_btn.click(
             on_send,
             inputs=[chat_input, chatbot, hints_used_state, submission_count_state, workspace_state],
@@ -692,31 +751,45 @@ def create_interface(workspace_path: str) -> gr.Blocks:
         with gr.Column(visible=True) as challenge_col:
             with gr.Row(elem_classes=["main-row"]):
                 with gr.Column(scale=3, elem_classes=["left-col"]):
-                    with gr.Tabs(elem_classes=["left-tabs"]):
-                        with gr.Tab("📋 Challenge"):
+                    with gr.Tabs(selected=0, elem_classes=["left-tabs"]) as left_tabs:
+
+                        with gr.Tab("📋 Challenge", id=0):
                             gr.Markdown(cs.readme())
-                        with gr.Tab("💻 Code Editor"):
+
+                        with gr.Tab("💻 Code Editor", id=1):
                             file_dropdown = gr.Dropdown(
                                 choices=py_files, value=default_file, label="File",
                                 info="Select a file to view. Submit saves to the target file.",
                             )
-                            code_editor   = gr.Code(
+                            with gr.Row():
+                                btn_tests   = gr.Button("▶ Run Tests",        variant="secondary")
+                                btn_changes = gr.Button("👁️ View My Changes", variant="secondary")
+                                search_btn  = gr.Button("🔍 Search (Ctrl+F)", variant="secondary", size="sm")
+                            code_editor = gr.Code(
                                 value=cs.read_target(), language="python", label=cs.target_file,
                                 interactive=True, lines=30, elem_id="code-editor",
                             )
-                        with gr.Tab("🧪 Test"):
-                            gr.Markdown("Run `challenge_run.py` against your current saved code.")
-                            run_tests_btn = gr.Button("▶ Run Tests", variant="primary")
-                            test_output   = gr.HTML(
-                                "<p style='color:#888;font-family:monospace;'>Click 'Run Tests'…</p>"
+                            save_status = gr.Markdown("")
+                            save_btn = gr.Button("💾 Save", variant="secondary")
+
+                        with gr.Tab("🧪 Test Results", id=2):
+                            test_output = gr.HTML(
+                                "<p style='color:#888;font-family:monospace;'>Click '▶ Run Tests' to run…</p>"
                             )
+                            run_tests_tab_btn = gr.Button("▶ Run Tests", variant="secondary")
+
+                        with gr.Tab("👁️ My Changes", id=3):
+                            gr.Markdown("_Diff: your saved file vs the original buggy code you received_")
+                            changes_diff_html = gr.HTML("")
+                            with gr.Row():
+                                refresh_btn = gr.Button("🔄 Refresh", variant="secondary")
+                                revert_btn  = gr.Button("↩️ Revert to Original", variant="secondary")
 
                 with gr.Column(scale=2, elem_classes=["right-col"]):
                     hint_counter = gr.Markdown(_hint_md(0, 0))
                     chatbot = gr.Chatbot(
                         label="AI Assistant",
                         elem_id="ai-chatbot",
-                        type="messages",
                     )
                     with gr.Row():
                         chat_input = gr.Textbox(
@@ -725,15 +798,11 @@ def create_interface(workspace_path: str) -> gr.Blocks:
                         )
                         send_btn   = gr.Button("Send", variant="secondary", scale=1)
                     gr.Markdown("---")
-                    with gr.Row():
-                        submit_btn = gr.Button("🚀 Submit Fix", variant="primary", scale=2)
-                        reset_btn  = gr.Button("↩️ Reset", scale=1)
+                    submit_btn = gr.Button("🚀 Submit Fix", variant="primary")
 
         # ── Results page ──────────────────────────────────────────────────
         with gr.Column(visible=False) as results_col:
-            with gr.Row():
-                gr.Markdown("## 📊 Submission Results")
-                back_btn = gr.Button("← Back to Editor", variant="secondary", scale=0)
+            gr.Markdown("## 📊 Submission Results")
 
             score_summary_html = gr.HTML("")
 
@@ -755,14 +824,35 @@ def create_interface(workspace_path: str) -> gr.Blocks:
             content = cs.read_py_file(rel_path)
             return gr.update(value=content, interactive=True, label=rel_path)
 
+        def on_save(code):
+            cs.write_target(code)
+            return "✅ Saved"
+
         def on_run_tests():
+            loading = '<p style="text-align:center;padding:20px;color:#888;">⏳ Running tests…</p>'
+            yield (gr.update(selected=2), loading)
             from orchestrator.scoring import run_tests
             r   = run_tests(workspace_path)
             raw = r["output"] if r["output"] else "No output."
-            return _colorise_test_output(raw)
+            yield (gr.update(selected=2), _colorise_test_output(raw))
+
+        def on_show_changes():
+            current = cs.read_target()
+            diff    = _diff_html(cs.sabotaged_code, current, "buggy (received)", "your saved code")
+            return (gr.update(selected=3), diff)
+
+        def on_revert():
+            cs.reset_target()
+            return cs.sabotaged_code, gr.update(selected=1)
 
         def on_submit(code, hints_used, submit_count, history):
-            cs.write_target(code)
+            _loading = '<p style="text-align:center;padding:40px;color:#888;font-size:1.2em;">⏳ Running tests…</p>'
+            yield (
+                gr.update(visible=False),
+                gr.update(visible=True),
+                _loading, "", "", "", "",
+                submit_count,
+            )
             result = evaluate_submission(
                 workspace_path=workspace_path,
                 student_code=code,
@@ -774,50 +864,49 @@ def create_interface(workspace_path: str) -> gr.Blocks:
             new_count = submit_count + 1
 
             score_html    = _score_summary_html(result)
-            your_diff     = _diff_html(cs.sabotaged_code, code,
-                                       "buggy (original)", "your fix")
-            expected_diff = _diff_html(cs.sabotaged_code, cs.original_code,
-                                       "buggy (original)", "correct original")
+            your_diff     = _diff_html(cs.sabotaged_code, code, "buggy (received)", "your fix")
+            expected_diff = _expected_fix_diff_html(cs)
             test_html     = _colorise_test_output(result["test_output"] or "No test output.")
             hints_html    = _hints_html(history or [])
 
-            return (
-                gr.update(visible=False),   # challenge_col
-                gr.update(visible=True),    # results_col
-                score_html,
-                your_diff,
-                expected_diff,
-                test_html,
-                hints_html,
+            yield (
+                gr.update(), gr.update(),
+                score_html, your_diff, expected_diff, test_html, hints_html,
                 new_count,
             )
-
-        def on_back():
-            return gr.update(visible=True), gr.update(visible=False)
-
-        def on_reset():
-            cs.reset_target()
-            return cs.sabotaged_code
 
         def on_send(message, history, hints_used, submit_count):
             if not message.strip():
                 penalty = PENALTY_TABLE[min(hints_used, len(PENALTY_TABLE) - 1)]
                 return history, "", hints_used, _hint_md(hints_used, penalty)
-            response  = get_hint(
+            result = get_hint(
                 user_message=message, history=history,
                 hints_used=hints_used, submission_attempts=submit_count,
                 challenge_info=cs.challenge_info(),
             )
-            history   = list(history or []) + [
+            history = list(history or []) + [
                 {"role": "user",      "content": message},
-                {"role": "assistant", "content": response},
+                {"role": "assistant", "content": result["response"]},
             ]
-            new_hints = hints_used + 1
+            new_hints = hints_used + (1 if result["gave_hint"] else 0)
             penalty   = PENALTY_TABLE[min(new_hints, len(PENALTY_TABLE) - 1)]
             return history, "", new_hints, _hint_md(new_hints, penalty)
 
+        # ── Wiring ────────────────────────────────────────────────────────
+
+        search_btn.click(fn=None, js=_SEARCH_JS)
+
         file_dropdown.change(on_file_select, inputs=[file_dropdown], outputs=[code_editor])
-        run_tests_btn.click(on_run_tests, outputs=[test_output])
+        save_btn.click(on_save, inputs=[code_editor], outputs=[save_status])
+
+        btn_tests.click(on_run_tests, outputs=[left_tabs, test_output])
+        run_tests_tab_btn.click(on_run_tests, outputs=[left_tabs, test_output])
+
+        btn_changes.click(on_show_changes, outputs=[left_tabs, changes_diff_html])
+        refresh_btn.click(on_show_changes, outputs=[left_tabs, changes_diff_html])
+
+        revert_btn.click(on_revert, outputs=[code_editor, left_tabs])
+
         submit_btn.click(
             on_submit,
             inputs=[code_editor, hints_used_state, submission_count_state, chatbot],
@@ -831,8 +920,6 @@ def create_interface(workspace_path: str) -> gr.Blocks:
                 submission_count_state,
             ],
         )
-        back_btn.click(on_back, outputs=[challenge_col, results_col])
-        reset_btn.click(on_reset, outputs=[code_editor])
         send_btn.click(
             on_send,
             inputs=[chat_input, chatbot, hints_used_state, submission_count_state],

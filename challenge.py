@@ -85,9 +85,11 @@ def main() -> None:
 
     if args.github_url:
         # ── Fast path: CLI args supplied → skip setup page ──────────────
+        if not args.name:
+            parser.error("--name is required when providing a GitHub URL (e.g. --name 'Alice Smith')")
         print(
             f"\n[challenge] CLI mode — URL: {args.github_url}  "
-            f"Level: {args.level}  Bugs: {args.num_bugs}\n"
+            f"Level: {args.level}  Bugs: {args.num_bugs}  Name: {args.name}\n"
         )
         print("[challenge] Running pipeline…")
         workspace_path = student_interface._run_pipeline(

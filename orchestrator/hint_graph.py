@@ -27,6 +27,7 @@ class HintState(TypedDict):
     challenge_info: dict     # keys: function_name, bug_func_name, target_file, difficulty_level
     allow_level: int         # 0–3, set by node_check_hint_policy
     response: str            # filled by node_generate_hint
+    gave_hint: bool          # True if the AI gave substantive debugging guidance
 
 
 # ── Nodes ─────────────────────────────────────────────────────────────────────
@@ -105,7 +106,12 @@ UNIVERSAL RULES (always apply):
 3. Be encouraging and supportive
 4. Keep responses concise — 2–3 short paragraphs maximum
 5. Use guiding questions rather than direct answers when possible
-6. If the student asks for the solution outright, politely redirect them"""
+6. If the student asks for the solution outright, politely redirect them
+
+HINT TRACKING:
+At the very end of your response, on its own line, write exactly one of:
+  GAVE_HINT:YES  — if you provided any substantive debugging guidance, methodology, or code insight
+  GAVE_HINT:NO   — if you only acknowledged the student, gave general encouragement, or said you couldn't help"""
 
     llm = ChatOpenAI(model="gpt-4o", temperature=0.7)
 
@@ -119,9 +125,17 @@ UNIVERSAL RULES (always apply):
 
     try:
         resp = llm.invoke(lc_messages)
-        return {**state, "response": resp.content}
+        raw = resp.content
+        # Parse and strip the GAVE_HINT marker
+        gave_hint = False
+        lines = raw.rstrip().split("\n")
+        if lines and lines[-1].strip().startswith("GAVE_HINT:"):
+            marker = lines[-1].strip()
+            gave_hint = marker == "GAVE_HINT:YES"
+            raw = "\n".join(lines[:-1]).rstrip()
+        return {**state, "response": raw, "gave_hint": gave_hint}
     except Exception as exc:
-        return {**state, "response": f"Sorry, I had trouble generating a hint: {exc}"}
+        return {**state, "response": f"Sorry, I had trouble generating a hint: {exc}", "gave_hint": False}
 
 
 # ── Graph builder ─────────────────────────────────────────────────────────────
@@ -144,7 +158,7 @@ def get_hint(
     hints_used: int,
     submission_attempts: int,
     challenge_info: dict,
-) -> str:
+) -> dict:
     """
     Get a hint for the student.
 
@@ -184,5 +198,6 @@ def get_hint(
         "challenge_info": challenge_info,
         "allow_level": 0,
         "response": "",
+        "gave_hint": False,
     })
-    return result["response"]
+    return {"response": result["response"], "gave_hint": result["gave_hint"]}
