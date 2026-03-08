@@ -1,239 +1,208 @@
 # Legacy Code Challenge System
 
-A system for creating automated coding challenges from GitHub repositories, with an interactive web interface for students.
+An AI-powered system that turns any public GitHub repository into a live debugging challenge. The instructor runs one command; the student gets a Gradio web interface where they read the mission, edit the code, ask an AI assistant for hints, and submit their fix for automated scoring.
 
 ## 🎯 Overview
 
-This system:
-1. **Clones** a GitHub repository
-2. **Analyzes** the code to find suitable functions
-3. **Injects bugs** using AI (GPT-4) with varying difficulty levels
-4. **Generates test cases** automatically
-5. **Provides a web interface** for students to fix the bugs
+1. **Clone** a GitHub repository
+2. **Analyse** the code with AST scoring to pick the best file/function
+3. **Inject a bug** using GPT-4o with configurable difficulty
+4. **Deploy** test cases and a student README into the workspace
+5. **Launch** a Gradio web interface for the student
+
+---
 
 ## 📦 Installation
 
 ```bash
-# Install dependencies
 pip install -r requirements.txt
-
-# Set up your OpenAI API key
-echo "OPENAI_API_KEY=your-key-here" > .env
 ```
+
+Create a `.env` file in the project root:
+
+```
+OPENAI_API_KEY=sk-...
+```
+
+*(Intel corporate network only — uncomment the proxy lines in `challenge.py`)*
+
+---
 
 ## 🚀 Quick Start
 
-### Step 1: Generate a Challenge
+### Option A — GUI setup page (instructor fills in details in the browser)
 
 ```bash
-# Basic usage (Level 1 - Messy Code)
-python main.py https://github.com/username/repo.git
-
-# Specify difficulty level
-python main.py https://github.com/username/repo.git --level 2
-
-# Difficulty levels:
-# 1 = Messy Code (obfuscated variables, misleading comments)
-# 2 = Spaghetti Logic (nested conditions, swapped logic)
-# 3 = Sensitive Code (wrong numeric constants)
+python challenge.py
 ```
 
-This will create a workspace in `workspaces/repo_name/` with:
-- The sabotaged code
-- `challenge_run.py` - Test runner
-- `STUDENT_README.md` - Instructions for students
+Opens a setup form at `http://localhost:7860`. Fill in the GitHub URL, difficulty level, number of bugs and student name, then click **Start Challenge**.
 
-### Step 2: Launch the Student Interface
+### Option B — CLI (skip setup page, go straight to the challenge)
 
 ```bash
-# Start the web interface
-python student_interface.py
-
-# Or specify a different workspace
-python student_interface.py workspaces/Ugly_Legacy_code
-
-# Options:
-#   --share    Create a public share link (for remote students)
-#   --port     Specify port (default: 7860)
+python challenge.py <github_url> --name "Alice Smith" --level 1
 ```
 
-Then open http://localhost:7860 in your browser!
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--name` | *(required with URL)* | Student name shown in the header |
+| `--level` | `1` | Difficulty: 1 = Messy Code, 2 = Spaghetti Logic, 3 = Sensitive Code |
+| `--num-bugs` | `1` | Number of bugs to inject |
+| `--port` | `7860` | Gradio port |
+| `--share` | off | Generate a public Gradio share link |
 
-## 🎓 Student Interface Features
+**Example:**
 
-### 1. **Challenge Tab**
-- Read the full challenge instructions
-- See the bug report with expected vs actual output
-- Review constraints and evaluation criteria
+```bash
+python challenge.py https://github.com/mahmoud/boltons --name "Bob" --level 2 --num-bugs 1
+```
 
-### 2. **Code Editor Tab**
-- Edit the buggy code directly in the browser
-- Submit your solution with an explanation
-- Get instant feedback and scoring
-- Multiple test cases verify the fix
+---
 
-### 3. **AI Helper Chat**
-- Ask questions about debugging strategies
-- Get help understanding complex code
-- Learn debugging techniques
-- **Note:** The AI won't give you the answer directly!
+## 🎓 Student Interface
 
-## 🎯 Scoring System
+The Gradio UI has four tabs on the left and an AI assistant panel on the right.
 
-- **50 points**: All unit tests pass
-- **30 points**: Fix is minimal (1-3 lines)
-- **20 points**: Clear explanation provided
+### Left tabs
 
-**Total: 100 points**
+| Tab | Description |
+|-----|-------------|
+| **📋 Challenge** | The student README — mission briefing, bug report, constraints |
+| **💻 Code Editor** | Edit the target file. **💾 Save** writes to disk. Search bar with ◀ / 🔍 Find / ▶ navigation. |
+| **🧪 Test Results** | Run the test suite; coloured PASS / FAIL / CRASH output. |
+| **👁️ My Changes** | Unified diff of the saved file vs. the buggy original. **🔄 Refresh** re-reads the file; **↩️ Revert** restores the original. |
+
+> **Tip:** Editing in your IDE and saving there is fully supported — the Gradio interface never auto-saves over your changes.
+
+### Right panel
+
+- **AI Assistant** — progressive hints (see below)
+- **🚀 Submit Fix** — runs the test suite on the saved file, computes the score, and shows the Results page
+
+### Results page
+
+After submitting, a dedicated results page shows:
+
+- Score card (total / 100)
+- Test Results tab — per-case PASS / FAIL / CRASH
+- Your Changes tab — diff of submitted code vs. buggy original
+- Expected Fix tab — diff of buggy function vs. correct original (bug function only)
+- Hints Used tab — full AI conversation log
+
+---
+
+## 🤖 AI Assistant & Hint Policy
+
+The assistant uses a **progressive hint system** — it reveals more information the more hints the student has already used:
+
+| Hints used | What the AI may say |
+|-----------|---------------------|
+| 0 | General debugging strategy only |
+| 1–2 | May hint the bug is not in the surface function |
+| 3–4 | May describe the bug category (off-by-one, wrong operator, …) |
+| 5+ | May name the specific helper function |
+
+The assistant **never** writes corrected code or names the exact line to change.
+
+**Hint counting is smart**: only messages where the AI gave substantive debugging guidance increment the hint counter. Acknowledgements and encouragements do not count.
+
+---
+
+## 🎯 Scoring
+
+| Component | Points | Details |
+|-----------|--------|---------|
+| Test score | 0 – 80 | Proportional to test cases passed |
+| Diff score | 0 – 20 | Semantic similarity to the original correct code |
+| Hint penalty | − 0 to 30 | −2 / −6 / −12 / −20 / −30 cumulative after 1–5 real hints |
+
+**Total = max(0, test\_score + diff\_score − hint\_penalty)**
+
+---
 
 ## 📁 Project Structure
 
 ```
 LegacyInterview2/
-├── main.py                    # Challenge generator
-├── student_interface.py       # Web GUI for students
-├── requirements.txt           # Dependencies
-├── .env                       # API keys (create this!)
-├── architect/                 # Core system modules
-│   ├── graph.py              # LangGraph workflow
-│   ├── repo_cloner.py        # GitHub cloning
-│   ├── file_mapper.py        # File selection (randomized)
-│   ├── saboteur.py           # Bug injection with GPT
-│   ├── challenge_deployer.py # Test case generation
-│   └── readme_generator.py   # Student instructions
-└── workspaces/               # Generated challenges
-    └── repo_name/
-        ├── file1.py          # Sabotaged code
-        ├── challenge_run.py  # Test runner
-        ├── STUDENT_README.md # Instructions
-        └── submissions/      # Student submissions
+├── challenge.py               # Unified entry point (GUI or CLI)
+├── main.py                    # Architect-only entry point (no GUI)
+├── student_interface.py       # Gradio web interface
+├── requirements.txt
+├── .env                       # OPENAI_API_KEY (create this)
+├── architect/                 # Bug-generation pipeline
+│   ├── graph.py               # LangGraph 6-node workflow
+│   ├── state.py               # ArchitectState TypedDict
+│   ├── repo_cloner.py         # git clone via GitPython
+│   ├── file_mapper.py         # AST scoring → target file selection
+│   ├── saboteur.py            # GPT-4o bug injection & obfuscation
+│   ├── challenge_deployer.py  # Writes challenge_run.py
+│   └── readme_generator.py   # Writes STUDENT_README.md
+├── orchestrator/              # Scoring & hint sub-system
+│   ├── scoring.py             # run_tests(), evaluate_submission()
+│   └── hint_graph.py         # LangGraph hint sub-graph
+└── workspaces/                # Auto-created; one folder per challenge
+    └── <repo_name>/
+        ├── <target_file>.py   # Sabotaged code (student edits this)
+        ├── challenge_run.py   # Test runner
+        ├── STUDENT_README.md  # Challenge briefing
+        ├── challenge_state.json  # Metadata for scoring
+        └── submissions/       # Per-submission JSON logs
 ```
-
-## 🔧 How It Works
-
-### Challenge Generation Pipeline
-
-1. **Clone Repo** → Downloads the target repository
-2. **Map Files** → Scores and selects the best file for sabotage
-3. **Sabotage** → GPT-4 injects bugs and obfuscates code
-4. **Deploy** → Creates test cases using GPT-4o-mini
-5. **Generate README** → Creates student instructions
-
-### Randomization
-
-The system is highly randomized to ensure each run produces different challenges:
-- Random seed based on `time.time() + process_id`
-- Random selection from top 2-5 candidate files/functions
-- Random temperature for GPT (0.15-0.4)
-- Random number of test cases (2-4 additional tests)
-- Random number of bugs per difficulty level
-
-### AI Helper Safety
-
-The AI helper is constrained to:
-- ✅ Explain concepts and debugging strategies
-- ✅ Help understand code structure
-- ✅ Guide with questions
-- ❌ Never reveal the exact bug location
-- ❌ Never show the corrected code
-- ❌ Never give away the solution
-
-## 🎨 Example Usage
-
-```bash
-# Generate a challenge from a public repo
-python main.py https://github.com/refaelz1/Ugly_Legacy_code.git --level 1
-
-# Start the student interface
-python student_interface.py workspaces/Ugly_Legacy_code
-
-# Students can now:
-# 1. Read the challenge at http://localhost:7860
-# 2. Edit the code in the browser
-# 3. Chat with the AI helper for guidance
-# 4. Submit and get instant scoring
-```
-
-## 🧪 Testing
-
-Students can test their fixes at any time:
-
-```bash
-cd workspaces/Ugly_Legacy_code
-python challenge_run.py
-```
-
-This runs all test cases and shows which ones pass/fail.
-
-## 🎓 Educational Use Cases
-
-- **Coding Interviews**: Test debugging skills under pressure
-- **Code Review Training**: Learn to read and understand messy code
-- **Legacy Code Workshops**: Practice dealing with real-world scenarios
-- **Programming Courses**: Automated homework generation
-- **Self-Study**: Practice debugging with AI guidance
-
-## 🔒 Security Notes
-
-- The system executes student code in the same environment
-- For production use, consider sandboxing (Docker containers, etc.)
-- The AI helper is instructed not to give solutions, but creative students might find workarounds
-- Submissions are logged locally in `submissions/` folder
-
-## 🛠️ Configuration
-
-### Environment Variables
-
-```bash
-# .env file
-OPENAI_API_KEY=sk-...          # Required for GPT-4/GPT-4o-mini
-
-# Optional (for Intel corporate network)
-# http_proxy=http://proxy-iil.intel.com:912
-# https_proxy=http://proxy-iil.intel.com:912
-```
-
-### Customization
-
-- **Difficulty levels**: Modify `_LEVEL_INSTRUCTIONS` in `saboteur.py`
-- **Scoring weights**: Adjust in `ChallengeGrader.run_tests()`
-- **AI helper constraints**: Edit system prompt in `AIHelper.get_system_prompt()`
-- **Test case count**: Change `random.randint(2, 4)` in `challenge_deployer.py`
-
-## 📝 Tips for Instructors
-
-1. **Pre-generate challenges** for each student to ensure variety
-2. **Review submissions** in the `submissions/` folder
-3. **Customize scoring** based on your course requirements
-4. **Monitor AI helper** conversations to identify struggling students
-5. **Use different repositories** for different difficulty levels
-
-## 🐛 Troubleshooting
-
-**Issue**: "ModuleNotFoundError" when running tests
-- **Solution**: Make sure the repository has no external dependencies, or add them to the execution environment
-
-**Issue**: AI helper gives away too much
-- **Solution**: Strengthen the system prompt constraints in `AIHelper.get_system_prompt()`
-
-**Issue**: No suitable file found
-- **Solution**: The repo might not have functions that meet the criteria (20+ lines, uses primitives, etc.)
-
-**Issue**: All test cases fail after generation
-- **Solution**: GPT might have created invalid test cases. Run again (randomization will produce different results)
-
-## 📄 License
-
-This is an educational project. Use responsibly and ensure you have rights to the repositories you're sabotaging!
-
-## 🙏 Credits
-
-Built with:
-- LangChain + LangGraph for AI orchestration
-- OpenAI GPT-4 and GPT-4o-mini for code analysis and generation
-- Gradio for the web interface
-- GitPython for repository management
 
 ---
 
-**Happy Debugging! 🐛➜✨**
+## 🔧 Difficulty Levels
+
+| Level | Name | Sabotage Strategy |
+|-------|------|-------------------|
+| 1 | Messy Code | Rename internals to `var1`/`temp_x`, add misleading comments, one off-by-one or wrong-operator bug |
+| 2 | Spaghetti Logic | Level 1 + nested-if confusion, global variable misnaming |
+| 3 | Sensitive Code | Level 1 + corrupt a magic number, comments describe the *correct* formula |
+
+---
+
+## 🔒 Security Notes
+
+- Student code runs in the same Python process — use Docker for production
+- The AI assistant is prompted to never give the solution; determined students might try creative phrasing
+- Submissions are logged locally in `workspaces/<repo>/submissions/`
+
+---
+
+## 🛠️ Customisation
+
+| What | Where |
+|------|-------|
+| Difficulty prompt wording | `architect/saboteur.py` — `_LEVEL_INSTRUCTIONS` |
+| Scoring weights | `orchestrator/scoring.py` |
+| Hint policy thresholds | `orchestrator/hint_graph.py` — `node_check_hint_policy` |
+| Hint reveal levels | `orchestrator/hint_graph.py` — `node_generate_hint` system prompt |
+
+---
+
+## 🐛 Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| `ModuleNotFoundError` in test runner | Repo has external deps not in the student env — pick a pure-Python repo |
+| "No suitable file found" | Repo lacks functions with return values and arithmetic — try a different repo |
+| All test cases fail after generation | GPT produced bad test args — delete the workspace and re-run |
+| `OPENAI_API_KEY not set` | Create `.env` with your key or `export OPENAI_API_KEY=...` |
+| Corporate proxy errors | Uncomment the proxy lines in `challenge.py` |
+
+---
+
+## 📝 Instructor Tips
+
+1. **Pre-generate** one workspace per student before the session starts
+2. Send students the direct CLI command with their name already filled in
+3. Review `submissions/*.json` after the session — each has the full code snapshot and score breakdown
+4. Use `--level 1` for newcomers, `--level 3` for experienced developers
+5. Pure-Python utility libraries (e.g. `boltons`, `more-itertools`) make the best targets
+
+---
+
+Built with **LangGraph**, **LangChain**, **OpenAI GPT-4o**, **Gradio**, and **GitPython**.
+
+**Happy Debugging! 🐛 ➜ ✨**

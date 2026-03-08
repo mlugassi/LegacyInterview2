@@ -68,19 +68,22 @@ def main() -> None:
         help="Port for the Gradio GUI (default: 7860).",
     )
     parser.add_argument(
+        "--timer", type=int, default=0,
+        help="Countdown timer in minutes (0 = no timer). Only used when github_url is provided.",
+    )
+    parser.add_argument(
         "--share", action="store_true",
         help="Create a public Gradio share link.",
     )
     args = parser.parse_args()
 
-    launch_kwargs = dict(
+    base_kwargs = dict(
         server_name="127.0.0.1",
         server_port=args.port,
         share=args.share,
         inbrowser=True,
         theme=gr.themes.Base(),
         css=student_interface._CSS,
-        js=student_interface._JS,
     )
 
     if args.github_url:
@@ -97,16 +100,17 @@ def main() -> None:
         )
         print(f"[challenge] Workspace ready: {workspace_path}")
         print(f"[challenge] Opening http://localhost:{args.port}\n")
-        demo = student_interface.create_interface(workspace_path)
-        # Patch header to include name if supplied
-        # (create_interface sets its own header; name display is a nice-to-have)
-        demo.launch(**launch_kwargs)
+        demo = student_interface.create_interface(
+            workspace_path, student_name=args.name, timer_minutes=args.timer
+        )
+        # JS is embedded in gr.Blocks(js=_make_js(timer)) inside create_interface
+        demo.launch(**base_kwargs)
 
     else:
         # ── Normal path: open setup page in the browser ──────────────────
         print(f"\n[challenge] Opening setup page at http://localhost:{args.port}\n")
         demo = student_interface.create_full_interface()
-        demo.launch(**launch_kwargs)
+        demo.launch(**base_kwargs, js=student_interface._JS)
 
 
 if __name__ == "__main__":

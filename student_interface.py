@@ -164,14 +164,41 @@ def _run_pipeline(github_url: str, difficulty_level: int, num_bugs: int) -> str:
 
 PENALTY_TABLE = [0, 2, 6, 12, 20, 30]
 
-# Sets dark mode as the default on first visit.
-_JS = """
-() => {
+# Sets dark mode as the default on first visit and defines window.startTimer.
+def _make_js(timer_minutes: int = 0) -> str:
+    auto_start = (
+        f"\n    setTimeout(() => {{ window.startTimer({timer_minutes}); }}, 500);"
+        if timer_minutes > 0 else ""
+    )
+    return """() => {
     if (!localStorage.getItem('gradio-theme')) {
         localStorage.setItem('gradio-theme', 'dark');
     }
-}
-"""
+    window.startTimer = function(minutes) {
+        if (!minutes || minutes <= 0) return;
+        if (window._timerInterval) clearInterval(window._timerInterval);
+        const endTime = Date.now() + minutes * 60 * 1000;
+        function tick() {
+            const remaining = Math.max(0, endTime - Date.now());
+            const m = Math.floor(remaining / 60000);
+            const s = Math.floor((remaining % 60000) / 1000);
+            const el = document.getElementById('challenge-timer');
+            if (!el) return;
+            if (remaining === 0) {
+                el.innerHTML = '<span style="color:#ef4444;font-weight:bold;font-size:1.1em;">⏱️ TIME\\'S UP!</span>';
+                clearInterval(window._timerInterval);
+            } else {
+                const color = remaining < 300000 ? '#ef4444' : (remaining < 600000 ? '#f59e0b' : '#22c55e');
+                el.innerHTML = '⏱️ <span style="font-weight:bold;font-size:1.1em;color:' + color + ';">'
+                    + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0') + '</span>';
+            }
+        }
+        tick();
+        window._timerInterval = setInterval(tick, 1000);
+    };""" + auto_start + "\n}"
+
+
+_JS = _make_js(0)
 
 _CSS = """
 /* Keep footer visible */
@@ -195,18 +222,44 @@ footer svg { display: inline !important; }
 .diff-block { font-family: monospace; font-size: 0.85em; padding: 12px;
               border-radius: 8px; overflow-y: auto; max-height: 45vh;
               white-space: pre; background: #1e1e1e; color: #d4d4d4; }
+
+/* Challenge timer — right-aligned in header row */
+#challenge-timer { text-align: right; padding: 6px 8px; font-family: monospace; min-width: 120px; }
+.header-row { align-items: center !important; }
 """
 
-_SEARCH_JS = (
-    "() => { "
-    "  const ed = document.querySelector('#code-editor .cm-editor'); "
-    "  if (ed) { "
-    "    ed.focus(); "
-    "    ed.dispatchEvent(new KeyboardEvent('keydown', "
-    "      {key:'f', ctrlKey:true, bubbles:true, cancelable:true})); "
-    "  } "
-    "}"
-)
+_SEARCH_JS = """(query) => {
+  if (!query) return query;
+  const st = window._searchState;
+  if (st && st.query === query && st.matches.length > 0) {
+    st.index = (st.index + 1) % st.matches.length;
+    st.matches[st.index].scrollIntoView({behavior:'smooth', block:'center'});
+  } else {
+    const matches = [];
+    document.querySelectorAll('#code-editor .cm-line').forEach(l => {
+      if (l.textContent.includes(query)) matches.push(l);
+    });
+    window._searchState = {query, index: 0, matches};
+    if (matches.length) matches[0].scrollIntoView({behavior:'smooth', block:'center'});
+  }
+  return query;
+}"""
+
+_SEARCH_NEXT_JS = """(query) => {
+  const st = window._searchState;
+  if (!st || !st.matches.length) return query;
+  st.index = (st.index + 1) % st.matches.length;
+  st.matches[st.index].scrollIntoView({behavior:'smooth', block:'center'});
+  return query;
+}"""
+
+_SEARCH_PREV_JS = """(query) => {
+  const st = window._searchState;
+  if (!st || !st.matches.length) return query;
+  st.index = (st.index - 1 + st.matches.length) % st.matches.length;
+  st.matches[st.index].scrollIntoView({behavior:'smooth', block:'center'});
+  return query;
+}"""
 
 
 def _hint_md(hints_used: int, penalty: int) -> str:
@@ -389,6 +442,7 @@ def create_full_interface() -> gr.Blocks:
         workspace_state        = gr.State("")
         hints_used_state       = gr.State(0)
         submission_count_state = gr.State(0)
+        timer_trigger          = gr.Number(value=0, visible=False)
 
         # ════════════════════════════════════════════════════════════════════
         # PAGE 1 — Setup
@@ -417,6 +471,10 @@ def create_full_interface() -> gr.Blocks:
                     minimum=1, maximum=5, value=1, step=1,
                     label="Number of Bugs to Inject",
                 )
+            timer_slider = gr.Slider(
+                minimum=0, maximum=120, value=0, step=5,
+                label="⏱️ Challenge Timer (minutes — 0 = no timer)",
+            )
 
             start_btn  = gr.Button("🚀 Start Challenge", variant="primary", size="lg")
             status_box = gr.Textbox(
@@ -431,7 +489,9 @@ def create_full_interface() -> gr.Blocks:
         # ════════════════════════════════════════════════════════════════════
         with gr.Column(visible=False) as challenge_page:
 
-            header_md = gr.Markdown("### 🐛 Legacy Code Challenge")
+            with gr.Row(elem_classes=["header-row"]):
+                header_md  = gr.Markdown("### 🐛 Legacy Code Challenge")
+                timer_html = gr.HTML("", elem_id="challenge-timer")
 
             with gr.Row(elem_classes=["main-row"]):
 
@@ -451,7 +511,13 @@ def create_full_interface() -> gr.Blocks:
                             with gr.Row():
                                 btn_tests   = gr.Button("▶ Run Tests",        variant="secondary")
                                 btn_changes = gr.Button("👁️ View My Changes", variant="secondary")
-                                search_btn  = gr.Button("🔍 Search (Ctrl+F)", variant="secondary", size="sm")
+                            with gr.Row():
+                                search_box  = gr.Textbox(
+                                    placeholder="Search in file… (Enter = next match)", show_label=False, scale=5,
+                                )
+                                search_prev = gr.Button("◀", variant="secondary", scale=1, min_width=40)
+                                search_btn  = gr.Button("🔍 Find", variant="secondary", scale=1)
+                                search_next = gr.Button("▶", variant="secondary", scale=1, min_width=40)
                             code_editor = gr.Code(
                                 value="",
                                 language="python",
@@ -519,7 +585,7 @@ def create_full_interface() -> gr.Blocks:
 
         # ── Setup callback ─────────────────────────────────────────────────
 
-        def on_start(name, url, level_str, num_bugs):
+        def on_start(name, url, level_str, num_bugs, timer_mins):
             level = int(str(level_str).strip()[0])
 
             yield (
@@ -527,13 +593,8 @@ def create_full_interface() -> gr.Blocks:
                           value="⏳ Cloning repository and generating challenge…"
                                 " this may take 1–2 minutes."),
                 gr.update(interactive=False),
-                gr.update(),
-                gr.update(),
-                gr.update(),
-                gr.update(),
-                gr.update(),
-                gr.update(),
-                "",
+                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                "", 0,
             )
 
             try:
@@ -541,7 +602,8 @@ def create_full_interface() -> gr.Blocks:
                 cs       = ChallengeState(workspace_path)
                 py_files = cs.list_py_files()
                 default  = cs.target_file if cs.target_file in py_files else (py_files[0] if py_files else "")
-                suffix   = f" &nbsp;|&nbsp; {name.strip()}" if name.strip() else ""
+                name_str = name.strip()
+                suffix   = f" &nbsp;|&nbsp; {name_str}" if name_str else ""
 
                 yield (
                     gr.update(visible=False),
@@ -553,6 +615,7 @@ def create_full_interface() -> gr.Blocks:
                     gr.update(choices=py_files, value=default),
                     gr.update(value=cs.read_target(), label=cs.target_file, interactive=True),
                     workspace_path,
+                    int(timer_mins),
                 )
 
             except Exception as exc:
@@ -560,19 +623,25 @@ def create_full_interface() -> gr.Blocks:
                     gr.update(visible=True, value=f"❌ Error: {exc}"),
                     gr.update(interactive=True),
                     gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
-                    "",
+                    "", 0,
                 )
 
         start_btn.click(
             on_start,
-            inputs=[name_box, url_box, level_radio, bugs_slider],
+            inputs=[name_box, url_box, level_radio, bugs_slider, timer_slider],
             outputs=[
                 status_box, start_btn,
                 setup_page, challenge_page,
                 header_md, challenge_readme,
                 file_dropdown, code_editor,
-                workspace_state,
+                workspace_state, timer_trigger,
             ],
+        )
+
+        timer_trigger.change(
+            fn=None, inputs=[timer_trigger],
+            js="(n) => { window.startTimer && window.startTimer(n); return n; }",
+            outputs=[timer_trigger],
         )
 
         # ── Challenge callbacks ────────────────────────────────────────────
@@ -597,10 +666,13 @@ def create_full_interface() -> gr.Blocks:
             if not workspace_path:
                 yield (gr.update(selected=2), "<p style='color:#888'>No challenge loaded.</p>")
                 return
-            from orchestrator.scoring import run_tests
-            r   = run_tests(workspace_path)
-            raw = r["output"] if r["output"] else "No output."
-            yield (gr.update(selected=2), _colorise_test_output(raw))
+            try:
+                from orchestrator.scoring import run_tests
+                r   = run_tests(workspace_path)
+                raw = r["output"] if r["output"] else "No output."
+                yield (gr.update(selected=2), _colorise_test_output(raw))
+            except Exception as exc:
+                yield (gr.update(selected=2), f"<p style='color:#ef4444;font-family:monospace;'>❌ Error: {exc}</p>")
 
         def on_show_changes(workspace_path):
             if not workspace_path:
@@ -629,29 +701,33 @@ def create_full_interface() -> gr.Blocks:
             if not workspace_path:
                 yield (gr.update(), gr.update(), "No challenge loaded.", "", "", "", "", submit_count)
                 return
-            cs  = ChallengeState(workspace_path)
-            log = SubmissionLog(cs.workspace)
-            result = evaluate_submission(
-                workspace_path=workspace_path,
-                student_code=code,
-                original_code=cs.original_code,
-                bug_func_name=cs.bug_func_name,
-                hints_used=hints_used,
-            )
-            log.save(code, result, hints_used)
-            new_count = submit_count + 1
+            try:
+                cs  = ChallengeState(workspace_path)
+                log = SubmissionLog(cs.workspace)
+                result = evaluate_submission(
+                    workspace_path=workspace_path,
+                    student_code=code,
+                    original_code=cs.original_code,
+                    bug_func_name=cs.bug_func_name,
+                    hints_used=hints_used,
+                )
+                log.save(code, result, hints_used)
+                new_count = submit_count + 1
 
-            score_html    = _score_summary_html(result)
-            your_diff     = _diff_html(cs.sabotaged_code, code, "buggy (received)", "your fix")
-            expected_diff = _expected_fix_diff_html(cs)
-            test_html     = _colorise_test_output(result["test_output"] or "No test output.")
-            hints_html    = _hints_html(history or [])
+                score_html    = _score_summary_html(result)
+                your_diff     = _diff_html(cs.sabotaged_code, code, "buggy (received)", "your fix")
+                expected_diff = _expected_fix_diff_html(cs)
+                test_html     = _colorise_test_output(result["test_output"] or "No test output.")
+                hints_html    = _hints_html(history or [])
 
-            yield (
-                gr.update(), gr.update(),
-                score_html, your_diff, expected_diff, test_html, hints_html,
-                new_count,
-            )
+                yield (
+                    gr.update(), gr.update(),
+                    score_html, your_diff, expected_diff, test_html, hints_html,
+                    new_count,
+                )
+            except Exception as exc:
+                err = f"<p style='color:#ef4444;padding:20px;font-family:monospace;'>❌ Error during evaluation:<br>{exc}</p>"
+                yield (gr.update(), gr.update(), err, "", "", "", "", submit_count)
 
         def on_send(message, history, hints_used, submit_count, workspace_path):
             if not message.strip():
@@ -681,7 +757,10 @@ def create_full_interface() -> gr.Blocks:
 
         # ── Wiring ────────────────────────────────────────────────────────
 
-        search_btn.click(fn=None, js=_SEARCH_JS)
+        search_btn.click(fn=None, inputs=[search_box], outputs=[search_box], js=_SEARCH_JS)
+        search_box.submit(fn=None, inputs=[search_box], outputs=[search_box], js=_SEARCH_JS)
+        search_next.click(fn=None, inputs=[search_box], outputs=[search_box], js=_SEARCH_NEXT_JS)
+        search_prev.click(fn=None, inputs=[search_box], outputs=[search_box], js=_SEARCH_PREV_JS)
 
         file_dropdown.change(
             on_file_select,
@@ -728,7 +807,7 @@ def create_full_interface() -> gr.Blocks:
 
 # ── Legacy entry point (used by challenge.py CLI path) ───────────────────────
 
-def create_interface(workspace_path: str) -> gr.Blocks:
+def create_interface(workspace_path: str, student_name: str = "", timer_minutes: int = 0) -> gr.Blocks:
     """Build the challenge-only interface for a pre-existing workspace."""
 
     cs  = ChallengeState(workspace_path)
@@ -737,15 +816,19 @@ def create_interface(workspace_path: str) -> gr.Blocks:
     py_files     = cs.list_py_files()
     default_file = cs.target_file if cs.target_file in py_files else (py_files[0] if py_files else None)
 
-    with gr.Blocks(title="Legacy Code Challenge") as demo:
+    name_suffix = f" &nbsp;|&nbsp; {student_name.strip()}" if student_name.strip() else ""
+
+    with gr.Blocks(title="Legacy Code Challenge", js=_make_js(timer_minutes)) as demo:
 
         hints_used_state       = gr.State(0)
         submission_count_state = gr.State(0)
 
-        gr.Markdown(
-            f"### 🐛 Legacy Code Challenge &nbsp;|&nbsp; Level {cs.difficulty_level}",
-            elem_classes=["app-header"],
-        )
+        with gr.Row(elem_classes=["header-row"]):
+            gr.Markdown(
+                f"### 🐛 Legacy Code Challenge &nbsp;|&nbsp; Level {cs.difficulty_level}{name_suffix}",
+                elem_classes=["app-header"],
+            )
+            gr.HTML("", elem_id="challenge-timer")
 
         # ── Challenge page ────────────────────────────────────────────────
         with gr.Column(visible=True) as challenge_col:
@@ -764,7 +847,13 @@ def create_interface(workspace_path: str) -> gr.Blocks:
                             with gr.Row():
                                 btn_tests   = gr.Button("▶ Run Tests",        variant="secondary")
                                 btn_changes = gr.Button("👁️ View My Changes", variant="secondary")
-                                search_btn  = gr.Button("🔍 Search (Ctrl+F)", variant="secondary", size="sm")
+                            with gr.Row():
+                                search_box  = gr.Textbox(
+                                    placeholder="Search in file… (Enter = next match)", show_label=False, scale=5,
+                                )
+                                search_prev = gr.Button("◀", variant="secondary", scale=1, min_width=40)
+                                search_btn  = gr.Button("🔍 Find", variant="secondary", scale=1)
+                                search_next = gr.Button("▶", variant="secondary", scale=1, min_width=40)
                             code_editor = gr.Code(
                                 value=cs.read_target(), language="python", label=cs.target_file,
                                 interactive=True, lines=30, elem_id="code-editor",
@@ -831,10 +920,13 @@ def create_interface(workspace_path: str) -> gr.Blocks:
         def on_run_tests():
             loading = '<p style="text-align:center;padding:20px;color:#888;">⏳ Running tests…</p>'
             yield (gr.update(selected=2), loading)
-            from orchestrator.scoring import run_tests
-            r   = run_tests(workspace_path)
-            raw = r["output"] if r["output"] else "No output."
-            yield (gr.update(selected=2), _colorise_test_output(raw))
+            try:
+                from orchestrator.scoring import run_tests
+                r   = run_tests(workspace_path)
+                raw = r["output"] if r["output"] else "No output."
+                yield (gr.update(selected=2), _colorise_test_output(raw))
+            except Exception as exc:
+                yield (gr.update(selected=2), f"<p style='color:#ef4444;font-family:monospace;'>❌ Error: {exc}</p>")
 
         def on_show_changes():
             current = cs.read_target()
@@ -853,27 +945,31 @@ def create_interface(workspace_path: str) -> gr.Blocks:
                 _loading, "", "", "", "",
                 submit_count,
             )
-            result = evaluate_submission(
-                workspace_path=workspace_path,
-                student_code=code,
-                original_code=cs.original_code,
-                bug_func_name=cs.bug_func_name,
-                hints_used=hints_used,
-            )
-            log.save(code, result, hints_used)
-            new_count = submit_count + 1
+            try:
+                result = evaluate_submission(
+                    workspace_path=workspace_path,
+                    student_code=code,
+                    original_code=cs.original_code,
+                    bug_func_name=cs.bug_func_name,
+                    hints_used=hints_used,
+                )
+                log.save(code, result, hints_used)
+                new_count = submit_count + 1
 
-            score_html    = _score_summary_html(result)
-            your_diff     = _diff_html(cs.sabotaged_code, code, "buggy (received)", "your fix")
-            expected_diff = _expected_fix_diff_html(cs)
-            test_html     = _colorise_test_output(result["test_output"] or "No test output.")
-            hints_html    = _hints_html(history or [])
+                score_html    = _score_summary_html(result)
+                your_diff     = _diff_html(cs.sabotaged_code, code, "buggy (received)", "your fix")
+                expected_diff = _expected_fix_diff_html(cs)
+                test_html     = _colorise_test_output(result["test_output"] or "No test output.")
+                hints_html    = _hints_html(history or [])
 
-            yield (
-                gr.update(), gr.update(),
-                score_html, your_diff, expected_diff, test_html, hints_html,
-                new_count,
-            )
+                yield (
+                    gr.update(), gr.update(),
+                    score_html, your_diff, expected_diff, test_html, hints_html,
+                    new_count,
+                )
+            except Exception as exc:
+                err = f"<p style='color:#ef4444;padding:20px;font-family:monospace;'>❌ Error during evaluation:<br>{exc}</p>"
+                yield (gr.update(), gr.update(), err, "", "", "", "", submit_count)
 
         def on_send(message, history, hints_used, submit_count):
             if not message.strip():
@@ -894,7 +990,10 @@ def create_interface(workspace_path: str) -> gr.Blocks:
 
         # ── Wiring ────────────────────────────────────────────────────────
 
-        search_btn.click(fn=None, js=_SEARCH_JS)
+        search_btn.click(fn=None, inputs=[search_box], outputs=[search_box], js=_SEARCH_JS)
+        search_box.submit(fn=None, inputs=[search_box], outputs=[search_box], js=_SEARCH_JS)
+        search_next.click(fn=None, inputs=[search_box], outputs=[search_box], js=_SEARCH_NEXT_JS)
+        search_prev.click(fn=None, inputs=[search_box], outputs=[search_box], js=_SEARCH_PREV_JS)
 
         file_dropdown.change(on_file_select, inputs=[file_dropdown], outputs=[code_editor])
         save_btn.click(on_save, inputs=[code_editor], outputs=[save_status])
