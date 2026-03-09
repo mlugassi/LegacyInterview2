@@ -1,18 +1,19 @@
-# Legacy Code Challenge System
+﻿# Legacy Code Challenge System 
 
-An AI-powered system that turns any public GitHub repository into a live debugging challenge. The instructor runs one command; the student gets a Gradio web interface where they read the mission, edit the code, ask an AI assistant for hints, and submit their fix for automated scoring.
+An AI-powered system that transforms any public GitHub repository into a live debugging challenge. Generate complex code challenges with configurable nested function calls, inject intelligent bugs, and provide students with a Gradio web interface for solving them.
 
-## 🎯 Overview
+##  Overview
 
-1. **Clone** a GitHub repository
-2. **Analyse** the code with AST scoring to pick the best file/function
-3. **Inject a bug** using GPT-4o with configurable difficulty
-4. **Deploy** test cases and a student README into the workspace
-5. **Launch** a Gradio web interface for the student
+The system takes a GitHub repository and:
+1. **Clones** the repository
+2. **Analyzes** code structure using AST to find functions at specific nesting depths
+3. **Injects bugs** using GPT-4 with configurable call-chain complexity
+4. **Inflates functions** to hide bugs in deeply nested call chains
+5. **Optionally obfuscates** code with renaming and restructuring
+6. **Generates test cases** (5 public + 5 secret tests)
+7. **Creates student interface** with AI hint system
 
----
-
-## 📦 Installation
+##  Installation
 
 ```bash
 pip install -r requirements.txt
@@ -24,185 +25,361 @@ Create a `.env` file in the project root:
 OPENAI_API_KEY=sk-...
 ```
 
-*(Intel corporate network only — uncomment the proxy lines in `challenge.py`)*
+*(For Intel corporate network, uncomment proxy lines in the code)*
 
 ---
 
-## 🚀 Quick Start
+##  Quick Start
 
-### Option A — GUI setup page (instructor fills in details in the browser)
+### Generate a Challenge
 
 ```bash
-python challenge.py
+# Basic usage (default: nesting level 3)
+python main.py https://github.com/username/repo.git
+
+# Specify nesting level (1-6) - higher = deeper call chains
+python main.py https://github.com/mahmoud/boltons.git --nesting-level 4
+
+# Enable refactoring/obfuscation
+python main.py https://github.com/mahmoud/boltons.git --nesting-level 5 --refactoring
+
+# Inject multiple bugs
+python main.py https://github.com/mahmoud/boltons.git --num-bugs 2
+
+# Enable debug mode to see call chain visualization
+python main.py https://github.com/mahmoud/boltons.git --nesting-level 4 --debug
 ```
 
-Opens a setup form at `http://localhost:7860`. Fill in the GitHub URL, difficulty level, number of bugs and student name, then click **Start Challenge**.
+**Command-line parameters:**
+- `--nesting-level N` (1-6): Target call-chain depth for bug placement (default: 3)
+- `--num-bugs N`: Number of bugs to inject (default: 1)
+- `--refactoring`: Apply obfuscation and code restructuring (default: off)
+- `--debug`: Show call chain visualization and detailed logging (default: off)
 
-### Option B — CLI (skip setup page, go straight to the challenge)
+### Launch Student Interface
 
 ```bash
-python challenge.py <github_url> --name "Alice Smith" --level 1
+python student_interface.py workspaces/repo_name
 ```
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--name` | *(required with URL)* | Student name shown in the header |
-| `--level` | `1` | Difficulty: 1 = Messy Code, 2 = Spaghetti Logic, 3 = Sensitive Code |
-| `--num-bugs` | `1` | Number of bugs to inject |
-| `--port` | `7860` | Gradio port |
-| `--share` | off | Generate a public Gradio share link |
+Opens at `http://localhost:7860` (use `--port 7861` to change)
 
-**Example:**
+---
 
-```bash
-python challenge.py https://github.com/mahmoud/boltons --name "Bob" --level 2 --num-bugs 1
+##  Key Features
+
+###  Nesting Level System (1-6)
+
+The system finds or creates functions at specific call depths:
+
+- **Level 1-2**: Surface functions calling helpers directly
+- **Level 3-4**: Multi-layer call chains with intermediate processors
+- **Level 5-6**: Deep hierarchies with complex dependencies
+
+**Dynamic Augmentation**: If no deep chain exists, the system automatically creates intermediate wrapper functions (e.g., `_intermediate_processor_1`, `_intermediate_processor_2`) to reach the target depth!
+
+###  Call Chain Visualization (Debug Mode)
+
+When `--debug` is enabled, see the exact call path:
+
+```
+Bug Location: unique_iter (Depth: 4)
+Call Path:
+> unique
+
+  > _intermediate_processor_3
+  
+    > _intermediate_processor_2
+    
+      > _intermediate_processor_1
+      
+        > unique_iter   BUG HERE
 ```
 
----
+###  Intelligent Bug Injection
 
-## 🎓 Student Interface
+- GPT-4 analyzes function semantics and creates subtle, realistic bugs
+- Generates diverse test cases (5 public for development + 5 secret for validation)
+- Ensures bugs are detectable but not obvious
+- Multiple bug types: off-by-one, wrong operators, inverted conditions, etc.
 
-The Gradio UI has four tabs on the left and an AI assistant panel on the right.
+###  Code Obfuscation (Optional)
 
-### Left tabs
+With `--refactoring` flag:
+- Renames variables to generic names (`var1`, `temp_x`)
+- Adds misleading comments
+- Restructures control flow
+- Makes debugging significantly harder
 
-| Tab | Description |
-|-----|-------------|
-| **📋 Challenge** | The student README — mission briefing, bug report, constraints |
-| **💻 Code Editor** | Edit the target file. **💾 Save** writes to disk. Search bar with ◀ / 🔍 Find / ▶ navigation. |
-| **🧪 Test Results** | Run the test suite; coloured PASS / FAIL / CRASH output. |
-| **👁️ My Changes** | Unified diff of the saved file vs. the buggy original. **🔄 Refresh** re-reads the file; **↩️ Revert** restores the original. |
+###  AI Hint System
 
-> **Tip:** Editing in your IDE and saving there is fully supported — the Gradio interface never auto-saves over your changes.
-
-### Right panel
-
-- **AI Assistant** — progressive hints (see below)
-- **🚀 Submit Fix** — runs the test suite on the saved file, computes the score, and shows the Results page
-
-### Results page
-
-After submitting, a dedicated results page shows:
-
-- Score card (total / 100)
-- Test Results tab — per-case PASS / FAIL / CRASH
-- Your Changes tab — diff of submitted code vs. buggy original
-- Expected Fix tab — diff of buggy function vs. correct original (bug function only)
-- Hints Used tab — full AI conversation log
+Progressive hint disclosure based on usage:
+- **0-2 hints**: General debugging strategies
+- **3-4 hints**: May suggest bug categories (off-by-one, logic error)
+- **5+ hints**: May point to specific helper functions
+- **Never reveals**: Exact line numbers or corrected code
 
 ---
 
-## 🤖 AI Assistant & Hint Policy
+##  Student Interface
 
-The assistant uses a **progressive hint system** — it reveals more information the more hints the student has already used:
+### Challenge Setup Page
+- Beautiful landing page with challenge title
+- Shows challenge parameters (nesting level, refactoring status, number of bugs)
+- Start Challenge button to enter main interface
 
-| Hints used | What the AI may say |
-|-----------|---------------------|
-| 0 | General debugging strategy only |
-| 1–2 | May hint the bug is not in the surface function |
-| 3–4 | May describe the bug category (off-by-one, wrong operator, …) |
-| 5+ | May name the specific helper function |
+### Main Challenge Page
 
-The assistant **never** writes corrected code or names the exact line to change.
+** Challenge Instructions**
+- Mission briefing with bug description
+- Function signature and expected behavior
+- Test case examples
 
-**Hint counting is smart**: only messages where the AI gave substantive debugging guidance increment the hint counter. Acknowledgements and encouragements do not count.
+** Challenge Parameters**
+- Nesting Level: Shows call-chain depth
+- Refactoring: Enabled/Disabled
+- Debug Mode: On/Off
+- Number of Bugs: 1-5
+
+** Hint System**
+- Chat interface with AI assistant
+- Ask questions about the bug
+- Progressive hint disclosure
+- Hints affect final score (-5 points per hint)
+
+** Code Editor**
+- Syntax-highlighted Python editor
+- Edit the buggy code directly
+- Save changes with instant feedback
+
+** Testing & Submission**
+- Run Tests button to execute test suite
+- Real-time test results display
+- Pass/fail indicators for each test case
+
+** Scoring**
+- Test score (0-100 based on passing tests)
+- Hint penalty calculation
+- Final score display with breakdown
 
 ---
 
-## 🎯 Scoring
-
-| Component | Points | Details |
-|-----------|--------|---------|
-| Test score | 0 – 80 | Proportional to test cases passed |
-| Diff score | 0 – 20 | Semantic similarity to the original correct code |
-| Hint penalty | − 0 to 30 | −2 / −6 / −12 / −20 / −30 cumulative after 1–5 real hints |
-
-**Total = max(0, test\_score + diff\_score − hint\_penalty)**
-
----
-
-## 📁 Project Structure
+##  Project Structure
 
 ```
 LegacyInterview2/
-├── challenge.py               # Unified entry point (GUI or CLI)
-├── main.py                    # Architect-only entry point (no GUI)
-├── student_interface.py       # Gradio web interface
-├── requirements.txt
-├── .env                       # OPENAI_API_KEY (create this)
-├── architect/                 # Bug-generation pipeline
-│   ├── graph.py               # LangGraph 6-node workflow
-│   ├── state.py               # ArchitectState TypedDict
-│   ├── repo_cloner.py         # git clone via GitPython
-│   ├── file_mapper.py         # AST scoring → target file selection
-│   ├── saboteur.py            # GPT-4o bug injection & obfuscation
-│   ├── challenge_deployer.py  # Writes challenge_run.py
-│   └── readme_generator.py   # Writes STUDENT_README.md
-├── orchestrator/              # Scoring & hint sub-system
-│   ├── scoring.py             # run_tests(), evaluate_submission()
-│   └── hint_graph.py         # LangGraph hint sub-graph
-└── workspaces/                # Auto-created; one folder per challenge
-    └── <repo_name>/
-        ├── <target_file>.py   # Sabotaged code (student edits this)
-        ├── challenge_run.py   # Test runner
-        ├── STUDENT_README.md  # Challenge briefing
-        ├── challenge_state.json  # Metadata for scoring
-        └── submissions/       # Per-submission JSON logs
+ main.py                    # Challenge generator (CLI)
+ student_interface.py       # Gradio web interface for students
+ requirements.txt           # Python dependencies
+ .env                       # API keys (create this!)
+
+ architect/                 # Core challenge generation
+    graph.py              # LangGraph workflow orchestration
+    state.py              # ArchitectState TypedDict definition
+    repo_cloner.py        # GitHub repository cloning
+    file_mapper.py        # AST analysis & file selection
+    saboteur.py           # Bug injection & function inflation
+    challenge_deployer.py # Test case generation
+    readme_generator.py   # Student instruction generation
+    nodes.py              # Individual workflow nodes
+
+ workspaces/               # Generated challenges (auto-created)
+     repo_name/
+         repo/             # Cloned repository with sabotaged files
+         challenge_run.py          # Public test runner (5 tests)
+         challenge_run_secret.py   # Secret test runner (5 tests)
+         STUDENT_README.md         # Challenge instructions
+         detailed_explanation.txt  # Instructor reference
+         challenge_state.json      # Metadata for grading
 ```
 
 ---
 
-## 🔧 Difficulty Levels
+##  How It Works
 
-| Level | Name | Sabotage Strategy |
-|-------|------|-------------------|
-| 1 | Messy Code | Rename internals to `var1`/`temp_x`, add misleading comments, one off-by-one or wrong-operator bug |
-| 2 | Spaghetti Logic | Level 1 + nested-if confusion, global variable misnaming |
-| 3 | Sensitive Code | Level 1 + corrupt a magic number, comments describe the *correct* formula |
+### Challenge Generation Pipeline
+
+1. **Clone Repository**
+   - Downloads GitHub repo using GitPython
+   - Preserves full directory structure
+
+2. **Map Files** 
+   - Builds call graphs for all Python files using AST
+   - Calculates maximum nesting depth for each file
+   - Scores files based on complexity and depth match
+   - Weighted random selection (prefers files with target depth)
+
+3. **Select Functions**
+   - Finds surface functions with deep call chains
+   - 60% probability: use existing deep chains
+   - 40% probability: augment shallow chains by creating intermediate functions
+
+4. **Inject Bugs**
+   - GPT-4 analyzes target function semantics
+   - Creates subtle, realistic bugs (off-by-one, wrong operators, etc.)
+   - Generates 10 diverse test cases (5 public + 5 secret)
+   - Verifies bug is detectable with test cases
+
+5. **Inflate Hierarchy**
+   - Expands ALL functions in call chain to 50+ lines
+   - Adds dummy variables, redundant checks, extra calculations
+   - Makes bugs much harder to spot
+
+6. **Obfuscate (Optional)**
+   - Renames variables to generic names
+   - Adds misleading comments
+   - Restructures control flow
+
+7. **Deploy Challenge**
+   - Writes sabotaged code back to files
+   - Creates challenge_run.py with public tests
+   - Creates challenge_run_secret.py with secret tests
+   - Generates STUDENT_README.md with instructions
+   - Creates detailed_explanation.txt for instructors
+
+### Test Case Strategy
+
+**Public Tests (5 cases)**
+- Simpler test cases shown during development
+- 2-3 should pass with buggy code (for encouragement)
+- 2-3 should fail (to guide toward bug)
+- Help students understand expected behavior
+
+**Secret Tests (5 cases)**
+- Harder edge cases for final validation
+- All should fail with buggy code
+- More comprehensive coverage
+- Only revealed during final submission
+
+**Key principle**: Passing public tests  Passing secret tests!
 
 ---
 
-## 🔒 Security Notes
+##  Example Workflows
 
-- Student code runs in the same Python process — use Docker for production
-- The AI assistant is prompted to never give the solution; determined students might try creative phrasing
-- Submissions are logged locally in `workspaces/<repo>/submissions/`
+### For Instructors
+
+```bash
+# Generate easy challenge (shallow nesting, no obfuscation)
+python main.py https://github.com/mahmoud/boltons.git --nesting-level 2
+
+# Generate hard challenge (deep nesting + obfuscation)
+python main.py https://github.com/mahmoud/boltons.git --nesting-level 5 --refactoring
+
+# Generate with debug info to verify call chain
+python main.py https://github.com/mahmoud/boltons.git --nesting-level 4 --debug
+
+# Review the generated challenge
+cat workspaces/boltons/STUDENT_README.md
+cat workspaces/boltons/detailed_explanation.txt
+
+# Test the challenge yourself
+cd workspaces/boltons
+python challenge_run.py
+python challenge_run_secret.py
+```
+
+### For Students
+
+```bash
+# Launch the interface
+python student_interface.py workspaces/boltons
+
+# Then in the browser at http://localhost:7860:
+# 1. Read the challenge instructions
+# 2. Ask AI for hints if stuck
+# 3. Edit the code in the editor
+# 4. Save changes
+# 5. Run tests to see results
+# 6. Submit when all tests pass!
+```
 
 ---
 
-## 🛠️ Customisation
+##  Scoring System
 
-| What | Where |
-|------|-------|
-| Difficulty prompt wording | `architect/saboteur.py` — `_LEVEL_INSTRUCTIONS` |
-| Scoring weights | `orchestrator/scoring.py` |
-| Hint policy thresholds | `orchestrator/hint_graph.py` — `node_check_hint_policy` |
-| Hint reveal levels | `orchestrator/hint_graph.py` — `node_generate_hint` system prompt |
+**Test Score (0-100)**
+- Proportional to test cases passed
+- Example: 8/10 tests pass = 80 points
 
----
+**Hint Penalty**
+- -5 points per hint used
+- Maximum penalty: -25 points (5 hints)
+- Encourages independent problem-solving
 
-## 🐛 Troubleshooting
-
-| Symptom | Fix |
-|---------|-----|
-| `ModuleNotFoundError` in test runner | Repo has external deps not in the student env — pick a pure-Python repo |
-| "No suitable file found" | Repo lacks functions with return values and arithmetic — try a different repo |
-| All test cases fail after generation | GPT produced bad test args — delete the workspace and re-run |
-| `OPENAI_API_KEY not set` | Create `.env` with your key or `export OPENAI_API_KEY=...` |
-| Corporate proxy errors | Uncomment the proxy lines in `challenge.py` |
+**Final Score**
+```
+Final Score = max(0, Test Score - Hint Penalty)
+```
 
 ---
 
-## 📝 Instructor Tips
+##  Educational Use Cases
 
-1. **Pre-generate** one workspace per student before the session starts
-2. Send students the direct CLI command with their name already filled in
-3. Review `submissions/*.json` after the session — each has the full code snapshot and score breakdown
-4. Use `--level 1` for newcomers, `--level 3` for experienced developers
-5. Pure-Python utility libraries (e.g. `boltons`, `more-itertools`) make the best targets
+- **Coding Interviews**: Test debugging skills with realistic bugs
+- **Code Review Training**: Learn to read complex call chains
+- **Legacy Code Workshops**: Practice dealing with messy codebases
+- **Programming Courses**: Automated debugging assignments
+- **Self-Study**: Practice with AI-guided learning
 
 ---
 
-Built with **LangGraph**, **LangChain**, **OpenAI GPT-4o**, **Gradio**, and **GitPython**.
+##  Security Notes
 
-**Happy Debugging! 🐛 ➜ ✨**
+- Student code executes in the same Python environment
+- For production: use Docker containers or sandboxing
+- AI helper is constrained but determined students may find workarounds
+- All submissions logged locally in challenge_state.json
+
+---
+
+##  Tips for Instructors
+
+1. **Pre-generate challenges** for variety (different repos, different runs)
+2. **Review generated challenges** using detailed_explanation.txt
+3. **Test challenges yourself** before giving to students
+4. **Monitor hint usage** to identify struggling students
+5. **Use different nesting levels** for different skill levels:
+   - Beginners: Level 1-2
+   - Intermediate: Level 3-4
+   - Advanced: Level 5-6 with --refactoring
+6. **Choose good repositories**:
+   - Pure Python (no external dependencies)
+   - Utility libraries work best (boltons, more-itertools)
+   - Avoid frameworks (Django, Flask) - too many dependencies
+
+---
+
+##  Recommended Repositories
+
+Good targets for challenges:
+- [mahmoud/boltons](https://github.com/mahmoud/boltons) - Pure Python utilities
+- [more-itertools/more-itertools](https://github.com/more-itertools/more-itertools) - Iterator tools
+- [jsonpickle/jsonpickle](https://github.com/jsonpickle/jsonpickle) - JSON serialization
+- [python-attrs/attrs](https://github.com/python-attrs/attrs) - Class utilities
+
+Avoid:
+- Repos with C extensions
+- Web frameworks (too many dependencies)
+- Repos with heavy external dependencies
+
+---
+
+##  Credits
+
+Built with:
+- **LangChain + LangGraph** - AI workflow orchestration
+- **OpenAI GPT-4 / GPT-4o** - Code analysis and bug generation
+- **Gradio** - Web interface framework
+- **GitPython** - Repository management
+- **Python AST** - Code structure analysis
+
+---
+
+##  License
+
+Educational use. Ensure you have rights to repositories used.
+
+---
+
+**Happy Debug ging!   **

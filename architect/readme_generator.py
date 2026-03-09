@@ -2,35 +2,34 @@ import os
 
 from architect.state import ArchitectState
 
-_LEVEL_NAMES = {1: "Level 1 — Messy Code", 2: "Level 2 — Spaghetti Logic", 3: "Level 3 — Sensitive Code"}
-
-_LEVEL_TIPS = {
-    1: "The code has been obfuscated with meaningless variable names and misleading comments. "
-       "The bug may not be inside `{func}` itself — it could be in a helper function that `{func}` calls. "
-       "Trace the full call chain carefully before drawing conclusions.",
-    2: "Watch out for nested conditions and variables that look global. "
-       "The bug may not be inside `{func}` itself — check every function it delegates to. "
-       "Trace every branch of the logic before concluding where the error is.",
-    3: "The bug is a numeric constant (a 'magic number'). "
-       "It may not be inside `{func}` itself — it could be in a helper it calls. "
-       "Do NOT try to understand every detail of the formula — focus on which number is wrong "
-       "by comparing the actual output to the expected output.",
-}
-
-
 def create_readme(state: ArchitectState) -> ArchitectState:
-    level = state["difficulty_level"]
+    nesting = state.get("nesting_level", 3)
     func = state["function_name"]
     args = state["test_args"]
     expected = state["expected_output"]
     actual = state["actual_output"]
     target_rel = os.path.relpath(state["target_file"], state["clone_path"])
-    level_name = _LEVEL_NAMES.get(level, f"Level {level}")
-    tip = _LEVEL_TIPS.get(level, "").format(func=func)
+    
+    # Generate hint based on nesting level
+    if nesting <= 2:
+        tip = (f"The bug might be directly in `{func}` or one level deep in a helper function it calls. "
+               f"Start by reading `{func}` carefully, then check any functions it uses.")
+    elif nesting <= 4:
+        tip = (f"The bug is hidden {nesting} levels deep in the call chain starting from `{func}`. "
+               f"You'll need to trace through multiple function calls to find it. "
+               f"Don't get lost in the details — focus on following the data flow.")
+    else:
+        tip = (f"This is a deep rabbit hole — the bug is {nesting} levels down from `{func}`. "
+               f"The code has been inflated and the bug is buried in a deeply nested helper function. "
+               f"Use the test cases to guide you to which branch of logic is broken.")
+    
+    refactoring_note = ""
+    if state.get("refactoring_enabled", False):
+        refactoring_note = "\n\n**Note:** The code has been intentionally obfuscated with confusing variable names and structure."
 
     readme_path = os.path.join(state["clone_path"], "STUDENT_README.md")
     content = f"""\
-# Legacy Code Challenge — {level_name}
+# Legacy Code Challenge — Nesting Level {nesting}
 
 ## Your Mission
 
@@ -54,7 +53,8 @@ Your job is to find the bug and fix it — **without breaking anything else**.
 | **Expected output** | `{expected}` |
 | **Actual output** | `{actual}` |
 
-Run `python challenge_run.py` at any time to see the current output vs expected.
+Run `python challenge_run.py` at any time to test your solution against public test cases.
+Run `python challenge_run_secret.py` to test against ALL tests (public + secret).{refactoring_note}
 
 ---
 

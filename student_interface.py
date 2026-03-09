@@ -2,7 +2,7 @@
 Student Interface — Gradio GUI for the Legacy Code Challenge.
 
 Two-page flow:
-  Page 1 (Setup):     student name, GitHub URL, difficulty level, num-bugs → Start
+  Page 1 (Setup):     student name, GitHub URL, nesting level, num-bugs, options → Start
   Page 2 (Challenge): README, Code Editor, Test runner + AI Assistant sidebar
   Page 3 (Results):   Score breakdown, diffs, test results, hints review
 """
@@ -40,7 +40,9 @@ class ChallengeState:
         self.sabotaged_code:   str  = data.get("sabotaged_code", "")
         self.function_name:    str  = data.get("function_name", "")
         self.bug_func_name:    str  = data.get("bug_func_name", "")
-        self.difficulty_level: int  = data.get("difficulty_level", 1)
+        self.nesting_level:    int  = data.get("nesting_level", 3)
+        self.refactoring_enabled: bool = data.get("refactoring_enabled", False)
+        self.debug_mode:       bool = data.get("debug_mode", False)
 
     @property
     def target_path(self) -> Path:
@@ -75,10 +77,12 @@ class ChallengeState:
 
     def challenge_info(self) -> dict:
         return {
-            "function_name":    self.function_name,
-            "bug_func_name":    self.bug_func_name,
-            "target_file":      self.target_file,
-            "difficulty_level": self.difficulty_level,
+            "function_name":       self.function_name,
+            "bug_func_name":       self.bug_func_name,
+            "target_file":         self.target_file,
+            "nesting_level":       self.nesting_level,
+            "refactoring_enabled": self.refactoring_enabled,
+            "debug_mode":          self.debug_mode,
         }
 
 
@@ -112,46 +116,57 @@ class SubmissionLog:
 
 # ── Pipeline runner ───────────────────────────────────────────────────────────
 
-def _run_pipeline(github_url: str, difficulty_level: int, num_bugs: int) -> str:
+def _run_pipeline(github_url: str, nesting_level: int, num_bugs: int, 
+                  refactoring_enabled: bool = False, debug_mode: bool = False) -> str:
     """Invoke the architect pipeline and return the workspace path."""
     from architect.graph import build_graph
 
     graph = build_graph()
     result = graph.invoke({
-        "github_url":       github_url,
-        "difficulty_level": difficulty_level,
-        "num_bugs":         num_bugs,
-        "clone_path":       "",
-        "target_file":      "",
-        "original_code":    "",
-        "sabotaged_code":   "",
-        "function_name":    "",
-        "test_args":        "",
-        "expected_output":  "",
-        "actual_output":    "",
-        "bug_description":  "",
-        "challenge_summary": "",
-        "test_cases":       [],
-        "candidate_files":  [],
-        "bug_func_name":    "",
-        "bug_func_source":  "",
+        "github_url":          github_url,
+        "nesting_level":       nesting_level,
+        "refactoring_enabled": refactoring_enabled,
+        "debug_mode":          debug_mode,
+        "num_bugs":            num_bugs,
+        "clone_path":          "",
+        "target_file":         "",
+        "original_code":       "",
+        "sabotaged_code":      "",
+        "function_name":       "",
+        "test_args":           "",
+        "expected_output":     "",
+        "actual_output":       "",
+        "bug_description":     "",
+        "detailed_explanation": "",
+        "challenge_summary":   "",
+        "test_cases":          [],
+        "public_tests":        [],
+        "secret_tests":        [],
+        "candidate_files":     [],
+        "bug_func_name":       "",
+        "bug_func_source":     "",
+        "call_chain":          {},
     })
 
     workspace_path = result["clone_path"]
 
     # Persist challenge_state.json
     challenge_state = {
-        "github_url":       github_url,
-        "workspace_path":   workspace_path,
-        "target_file":      result.get("target_file",      ""),
-        "original_code":    result.get("original_code",    ""),
-        "sabotaged_code":   result.get("sabotaged_code",   ""),
-        "function_name":    result.get("function_name",    ""),
-        "bug_func_name":    result.get("bug_func_name",    ""),
-        "bug_func_source":  result.get("bug_func_source",  ""),
-        "test_cases":       result.get("test_cases",       []),
-        "difficulty_level": difficulty_level,
-        "bug_description":  result.get("bug_description",  ""),
+        "github_url":          github_url,
+        "workspace_path":      workspace_path,
+        "target_file":         result.get("target_file",      ""),
+        "original_code":       result.get("original_code",    ""),
+        "sabotaged_code":      result.get("sabotaged_code",   ""),
+        "function_name":       result.get("function_name",    ""),
+        "bug_func_name":       result.get("bug_func_name",    ""),
+        "bug_func_source":     result.get("bug_func_source",  ""),
+        "test_cases":          result.get("test_cases",       []),
+        "public_tests":        result.get("public_tests",     []),
+        "secret_tests":        result.get("secret_tests",     []),
+        "nesting_level":       nesting_level,
+        "refactoring_enabled": refactoring_enabled,
+        "debug_mode":          debug_mode,
+        "bug_description":     result.get("bug_description",  ""),
     }
     state_path = Path(workspace_path) / "challenge_state.json"
     with open(state_path, "w", encoding="utf-8") as f:
@@ -462,14 +477,23 @@ def create_full_interface() -> gr.Blocks:
                 placeholder="https://github.com/mahmoud/boltons",
             )
             with gr.Row():
-                level_radio = gr.Radio(
-                    choices=["1 — Messy Code", "2 — Spaghetti Logic", "3 — Sensitive Code"],
-                    value="1 — Messy Code",
-                    label="Difficulty Level",
+                nesting_slider = gr.Slider(
+                    minimum=1, maximum=6, value=3, step=1,
+                    label="🔗 Nesting Level (call-chain depth)",
+                    info="Higher = deeper call chains (1=simple, 6=very deep)",
                 )
                 bugs_slider = gr.Slider(
                     minimum=1, maximum=5, value=1, step=1,
-                    label="Number of Bugs to Inject",
+                    label="🐛 Number of Bugs to Inject",
+                )
+            with gr.Row():
+                refactoring_check = gr.Checkbox(
+                    label="🔀 Enable Refactoring (obfuscation/spaghettification)",
+                    value=False,
+                )
+                debug_check = gr.Checkbox(
+                    label="🐞 Debug Mode (verbose output, show bug locations)",
+                    value=False,
                 )
             timer_slider = gr.Slider(
                 minimum=0, maximum=120, value=0, step=5,
@@ -585,20 +609,20 @@ def create_full_interface() -> gr.Blocks:
 
         # ── Setup callback ─────────────────────────────────────────────────
 
-        def on_start(name, url, level_str, num_bugs, timer_mins):
-            level = int(str(level_str).strip()[0])
+        def on_start(name, url, nesting_lvl, num_bugs, refactoring, debug, timer_mins):
+            nesting = int(nesting_lvl)
 
             yield (
                 gr.update(visible=True,
                           value="⏳ Cloning repository and generating challenge…"
                                 " this may take 1–2 minutes."),
                 gr.update(interactive=False),
-                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
                 "", 0,
             )
 
             try:
-                workspace_path = _run_pipeline(url.strip(), level, int(num_bugs))
+                workspace_path = _run_pipeline(url.strip(), nesting, int(num_bugs), refactoring, debug)
                 cs       = ChallengeState(workspace_path)
                 py_files = cs.list_py_files()
                 default  = cs.target_file if cs.target_file in py_files else (py_files[0] if py_files else "")
@@ -610,7 +634,7 @@ def create_full_interface() -> gr.Blocks:
                     gr.update(interactive=True),
                     gr.update(visible=False),
                     gr.update(visible=True),
-                    gr.update(value=f"### 🐛 Legacy Code Challenge &nbsp;|&nbsp; Level {level}{suffix}"),
+                    gr.update(value=f"### 🐛 Legacy Code Challenge &nbsp;|&nbsp; Nesting Level {nesting}{suffix}"),
                     gr.update(value=cs.readme()),
                     gr.update(choices=py_files, value=default),
                     gr.update(value=cs.read_target(), label=cs.target_file, interactive=True),
@@ -622,13 +646,13 @@ def create_full_interface() -> gr.Blocks:
                 yield (
                     gr.update(visible=True, value=f"❌ Error: {exc}"),
                     gr.update(interactive=True),
-                    gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                    gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
                     "", 0,
                 )
 
         start_btn.click(
             on_start,
-            inputs=[name_box, url_box, level_radio, bugs_slider, timer_slider],
+            inputs=[name_box, url_box, nesting_slider, bugs_slider, refactoring_check, debug_check, timer_slider],
             outputs=[
                 status_box, start_btn,
                 setup_page, challenge_page,
@@ -825,7 +849,7 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
 
         with gr.Row(elem_classes=["header-row"]):
             gr.Markdown(
-                f"### 🐛 Legacy Code Challenge &nbsp;|&nbsp; Level {cs.difficulty_level}{name_suffix}",
+                f"### 🐛 Legacy Code Challenge &nbsp;|&nbsp; Nesting Level {cs.nesting_level}{name_suffix}",
                 elem_classes=["app-header"],
             )
             gr.HTML("", elem_id="challenge-timer")

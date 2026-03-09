@@ -79,8 +79,15 @@ Reply with ONLY a valid JSON object (no markdown, no explanation), matching this
 
 {
   "sabotaged_function_code": "<the complete sabotaged function as a Python string — only the function def block>",
-  "test_cases": [
+  "test_cases_public": [
     {"args": "<Python literal tuple of args, e.g. (10, 3) or ('hello',)>", "correct_output": "<correct return value for the ORIGINAL function>"},
+    {"args": "...", "correct_output": "..."},
+    {"args": "...", "correct_output": "..."},
+    {"args": "...", "correct_output": "..."},
+    {"args": "...", "correct_output": "..."}
+  ],
+  "test_cases_secret": [
+    {"args": "...", "correct_output": "..."},
     {"args": "...", "correct_output": "..."},
     {"args": "...", "correct_output": "..."},
     {"args": "...", "correct_output": "..."},
@@ -88,6 +95,27 @@ Reply with ONLY a valid JSON object (no markdown, no explanation), matching this
   ],
   "bug_description": "<one sentence describing the FUNCTIONAL behavior that is now broken and why>"
 }
+
+CRITICAL TEST CASE REQUIREMENTS:
+
+PUBLIC TESTS (test_cases_public) - 5 SIMPLER TESTS FOR DEVELOPMENT:
+- These help the student understand the basic problem
+- Cover normal/common use cases
+- 2-3 should PASS (function works for simple inputs)
+- 2-3 should FAIL (exposing the bug in obvious cases)
+- Examples: typical inputs, small numbers, simple strings
+- Goal: Guide the student toward understanding what's broken
+
+SECRET TESTS (test_cases_secret) - 5 HARDER TESTS FOR FINAL VALIDATION:
+- These tests MUST be significantly harder and more precise
+- ALL 5 should expose the bug in subtle/edge-case scenarios
+- Focus on boundary conditions, edge cases, corner cases
+- Examples: empty inputs, None, zero, negative numbers, very large values, special characters
+- These tests should FAIL even if the student makes a partial/incomplete fix
+- Goal: Ensure the fix is complete and handles all edge cases correctly
+
+IMPORTANT: If all 5 public tests pass, it should NOT guarantee that all 5 secret tests pass!
+The secret tests must catch incomplete fixes that work for simple cases but fail on edges.
 
 Critical rules:
 - sabotaged_function_code must be ONLY the function definition (def ...: ...) — nothing before or after.
@@ -100,8 +128,7 @@ Critical rules:
   The sabotaged function must still run without raising exceptions; it just returns the wrong result.
   If your bug causes a TypeError, AttributeError, or any other exception, it will be REJECTED.
   Change a condition, a boundary, an operator, or a value — not the structure so drastically it crashes.
-- test_cases must contain EXACTLY 8 entries with DIVERSE inputs that exercise different code paths.
-  Each "args" must be a Python tuple literal using ONLY these primitives: int, float, str, list, dict, bool.
+- Each "args" must be a Python tuple literal using ONLY these primitives: int, float, str, list, dict, bool.
   NEVER use: lambda, range, callable, custom classes, or any non-serializable object.
   NEVER use keyword arguments — only positional values inside the tuple.
   Wrong: ('hello', sep=',') or (x=1, y=2)  |  Right: ('hello', ',') or (1, 2)
@@ -210,38 +237,69 @@ def _build_call_graph(module_func_nodes: dict) -> dict:
 
 def _find_reachable(call_graph: dict, start: str, max_depth: int) -> dict:
     """
-    BFS from start through call_graph up to max_depth hops.
-    Returns {func_name: depth} for every reachable function (excluding start).
+    Find all reachable functions from start with their MAXIMUM depth.
+    Returns {func_name: max_depth} for every reachable function (excluding start).
+    Uses DFS to explore all paths and keep the longest depth for each function.
     Only includes functions that exist as keys in call_graph.
     """
     visited: dict[str, int] = {}
-    queue: list[tuple[str, int]] = [(start, 0)]
-    while queue:
-        current, depth = queue.pop(0)
+    
+    def dfs(current: str, depth: int, seen: set[str]):
         if depth >= max_depth:
-            continue
+            return
+        
         for callee in call_graph.get(current, set()):
-            if callee not in visited and callee in call_graph:
+            if callee not in call_graph:
+                continue
+            
+            # Update with maximum depth found
+            if callee not in visited or visited[callee] < depth + 1:
                 visited[callee] = depth + 1
-                queue.append((callee, depth + 1))
+            
+            # Continue exploring if we haven't been through this exact path
+            if callee not in seen:
+                seen.add(callee)
+                dfs(callee, depth + 1, seen)
+                seen.remove(callee)
+    
+    dfs(start, 0, {start})
     return visited
 
 
 def _find_call_path(call_graph: dict, start: str, target: str, max_depth: int) -> list[str]:
-    """BFS: return shortest call path from start to target, e.g. ['a','b','c','target']."""
-    queue: list[tuple[str, list[str]]] = [(start, [start])]
-    visited = {start}
-    while queue:
-        current, path = queue.pop(0)
+    """
+    Find the LONGEST call path from start to target (up to max_depth).
+    This ensures we get chains matching the requested nesting level.
+    Uses DFS to explore all paths and returns the longest one found.
+    """
+    if start == target:
+        return [start]
+    
+    longest_path: list[str] = []
+    
+    def dfs(current: str, path: list[str], visited: set[str]):
+        nonlocal longest_path
+        
         if len(path) > max_depth + 1:
-            continue
+            return
+        
+        if current == target:
+            if len(path) > len(longest_path):
+                longest_path = path.copy()
+            return
+        
         for callee in call_graph.get(current, set()):
-            if callee == target:
-                return path + [callee]
             if callee not in visited:
                 visited.add(callee)
-                queue.append((callee, path + [callee]))
-    return [start, target]  # fallback if direct path not found
+                path.append(callee)
+                dfs(callee, path, visited)
+                path.pop()
+                visited.remove(callee)
+    
+    dfs(start, [start], {start})
+    
+    # If no path found, return direct connection as fallback
+    return longest_path if longest_path else [start, target]
 
 
 def _pick_surface_function(source: str, max_depth: int,
@@ -266,6 +324,7 @@ def _pick_surface_function(source: str, max_depth: int,
     call_graph = _build_call_graph(module_func_nodes)
 
     # Score each function by the depth and count of its reachable targets
+    # Heavily prefer functions that can reach targets at depths close to max_depth
     caller_candidates: list[tuple[int, str]] = []
     for name in module_func_nodes:
         reachable = _find_reachable(call_graph, name, max_depth)
@@ -275,8 +334,27 @@ def _pick_surface_function(source: str, max_depth: int,
         }
         if not substantial:
             continue
-        score = sum((d + 1) * 20 for d in substantial.values())
+        
+        # Compute score with strong preference for deep chains
+        score = 0
+        max_reachable_depth = max(substantial.values()) if substantial else 0
+        
+        # Bonus for having functions at good depths (prefer depth >= max_depth - 1)
+        for d in substantial.values():
+            if d >= max_depth - 1:
+                score += d * 100  # Very strong bonus for deep chains
+            elif d >= max_depth - 2:
+                score += d * 50   # Good bonus for moderately deep chains
+            else:
+                score += d * 10   # Small bonus for shallow chains
+        
+        # Additional bonus for maximum depth reached
+        if max_reachable_depth >= max_depth - 1:
+            score += 200
+        
+        # Function size contributes minimally
         score += module_func_nodes[name].end_lineno - module_func_nodes[name].lineno
+        
         caller_candidates.append((score, name))
 
     if caller_candidates:
@@ -443,13 +521,14 @@ def _sabotage_one_helper(
     indirect_mode: bool,
     call_chain: list[str] | None = None,
     previous_bugs: list[str] | None = None,
-    level: int = 1,
+    target_nesting: int = 3,
+    debug_mode: bool = False,
 ) -> tuple[str, dict] | tuple[None, None]:
     """
     Ask GPT to sabotage bug_func_name within current_source.
     call_chain is the path from surface_func_name down to bug_func_name.
     previous_bugs is a list of bug_description strings from prior failed attempts.
-    level controls which validation checks apply (renaming required only for levels 2+).
+    target_nesting indicates the desired call-chain depth.
     Splices result back. Returns (new_source, data_dict) or (None, None) on failure.
     """
     func_source, start_line, end_line = _extract_function_source(current_source, bug_func_name)
@@ -494,7 +573,8 @@ def _sabotage_one_helper(
             listed = "\n".join(f"  - {b}" for b in attempted_bugs)
             extra = f"\n\nThis is retry {attempt}. Previous attempts in THIS call used:\n{listed}\nChoose a DIFFERENT bug approach now."
         user_content = _build_user_content(extra)
-        print(f"[saboteur] GPT call (func='{bug_func_name}', attempt={attempt})…")
+        if debug_mode:
+            print(f"[saboteur] GPT call (func='{bug_func_name}', attempt={attempt})…")
         response = llm.invoke([
             SystemMessage(content=_SYSTEM_PROMPT),
             HumanMessage(content=user_content),
@@ -503,7 +583,8 @@ def _sabotage_one_helper(
         try:
             data = _parse_response(response.content)
         except json.JSONDecodeError as e:
-            print(f"[saboteur] JSON parse error: {e}")
+            if debug_mode:
+                print(f"[saboteur] JSON parse error: {e}")
             continue
 
         sabotaged_func = data["sabotaged_function_code"]
@@ -519,7 +600,8 @@ def _sabotage_one_helper(
         try:
             new_tree = ast.parse(candidate_source)
         except SyntaxError as e:
-            print(f"[saboteur] Syntax error: {e}")
+            if debug_mode:
+                print(f"[saboteur] Syntax error: {e}")
             continue
 
         # Verify function name preserved
@@ -528,12 +610,14 @@ def _sabotage_one_helper(
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
         if bug_func_name not in new_names:
-            print(f"[saboteur] GPT renamed '{bug_func_name}' — retrying")
+            if debug_mode:
+                print(f"[saboteur] GPT renamed '{bug_func_name}' — retrying")
             continue
 
         # Reject if any new comment reveals the bug
         if _has_revealing_comment(func_source, sabotaged_func):
-            print(f"[saboteur] Comment reveals bug on attempt {attempt} — retrying")
+            if debug_mode:
+                print(f"[saboteur] Comment reveals bug on attempt {attempt} — retrying")
             continue
 
         # Attach debug metadata (not visible to student)
@@ -1046,19 +1130,146 @@ def _spaghettify_file(source: str, surface_func_name: str, llm,
     return result, new_verified
 
 
+def _augment_chain_depth(source: str, current_chain: list[str], target_depth: int, 
+                         module_func_nodes: dict) -> tuple[str, list[str]]:
+    """
+    Add intermediate wrapper functions to extend a call chain to target_depth.
+    
+    If current_chain has depth < target_depth, this function creates new intermediate
+    functions and inserts them at random positions in the chain to reach the target depth.
+    
+    Returns: (updated_source, augmented_chain)
+    """
+    current_depth = len(current_chain) - 1
+    if current_depth >= target_depth:
+        return source, current_chain
+    
+    needed_functions = target_depth - current_depth
+    if needed_functions <= 0:
+        return source, current_chain
+    
+    # Generate unique names for intermediate functions
+    existing_names = set(module_func_nodes.keys())
+    intermediate_funcs = []
+    for i in range(needed_functions):
+        base_name = f"_intermediate_processor_{i+1}"
+        counter = 0
+        func_name = base_name
+        while func_name in existing_names:
+            counter += 1
+            func_name = f"{base_name}_{counter}"
+        intermediate_funcs.append(func_name)
+        existing_names.add(func_name)
+    
+    # Build augmented chain by inserting intermediates at various positions
+    # Prefer inserting near the middle/end to make debugging harder
+    augmented = current_chain.copy()
+    insertion_positions = []
+    
+    # Choose random positions (avoiding position 0 since that's the surface function)
+    available_positions = list(range(1, len(augmented)))
+    if not available_positions:
+        available_positions = [1]  # If chain has only 2 elements
+    
+    for func_name in intermediate_funcs:
+        if available_positions:
+            pos = random.choice(available_positions)
+        else:
+            pos = len(augmented) - 1
+        insertion_positions.append((pos, func_name))
+    
+    # Sort by position (descending) to insert from end to avoid index shifting
+    insertion_positions.sort(reverse=True, key=lambda x: x[0])
+    
+    for pos, func_name in insertion_positions:
+        augmented.insert(pos, func_name)
+    
+    # Now generate the actual function code for each intermediate
+    lines = source.splitlines(keepends=True)
+    tree = ast.parse(source)
+    
+    # Find a good insertion point (after imports, before first function)
+    first_func_line = None
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            first_func_line = node.lineno - 1
+            break
+    
+    if first_func_line is None:
+        first_func_line = len(lines)
+    
+    # Generate intermediate function definitions
+    new_function_defs = []
+    
+    for idx, func_name in enumerate(intermediate_funcs):
+        # Find what this function should call (the next in the augmented chain)
+        func_pos = augmented.index(func_name)
+        next_func = augmented[func_pos + 1]
+        
+        # Get signature info from the next function in chain
+        if next_func in module_func_nodes:
+            next_node = module_func_nodes[next_func]
+            # Extract parameter names
+            params = [arg.arg for arg in next_node.args.args]
+            param_str = ", ".join(params) if params else "*args, **kwargs"
+            call_str = f"{next_func}({', '.join(params)})" if params else f"{next_func}(*args, **kwargs)"
+        else:
+            param_str = "*args, **kwargs"
+            call_str = f"{next_func}(*args, **kwargs)"
+        
+        # Create an expanded intermediate function (following expansion rules)
+        func_code = f'''
+def {func_name}({param_str}):
+    """Intermediate processing layer {idx+1}."""
+    import random as _rand_module
+    _buffer_marker = len(str({params[0] if params else 'args'})) if {bool(params)} else 0
+    _tmp_state = _buffer_marker * 1
+    _validation_flag = True if _tmp_state >= 0 else False
+    _entropy_counter = sum(i * 0 for i in range(5))
+    _checksum_val = _entropy_counter + _buffer_marker - _buffer_marker
+    _ref_copy = {params[0] if params else 'None'}
+    _dummy_list = [x - x for x in range(4)]
+    _dead_sum = sum(_dummy_list)
+    
+    if _validation_flag and _checksum_val == 0:
+        _nested_check = _tmp_state >= 0 and _tmp_state is not None
+        if _nested_check:
+            _marker_a = len(_dummy_list) * 1
+            _marker_b = _marker_a - _marker_a
+            if _marker_b == 0:
+                _result_ref = {call_str}
+                _post_marker = len(str(_result_ref)) - len(str(_result_ref))
+                if _post_marker == 0:
+                    return _result_ref
+    
+    # Fallback path (never reached but looks plausible)
+    return {call_str}
+'''
+        new_function_defs.append(func_code)
+    
+    # Insert the new functions
+    insertion_block = "\n".join(new_function_defs) + "\n\n"
+    lines.insert(first_func_line, insertion_block)
+    
+    updated_source = "".join(lines)
+    
+    return updated_source, augmented
+
 
 def sabotage_init(state: ArchitectState) -> ArchitectState:
     """Phase 1 - Target Selection: pick the function and inject the AI-resistant bug.
 
     Runs the full file-scanning + bug-injection + test-case-verification loop.
     Stores the bug-only (no structural transforms) sabotaged code in state so
-    downstream nodes (code_inflation, obfuscation passes) can build on top of it.
+    downstream nodes (inflate_hierarchy, obfuscation passes) can build on top of it.
     """
-    level = state["difficulty_level"]
-    instructions = _LEVEL_INSTRUCTIONS.get(level, _LEVEL_INSTRUCTIONS[1])
+    # Use nesting_level instead of difficulty_level
+    target_nesting = state["nesting_level"]
+    debug_mode = state.get("debug_mode", False)
+    instructions = _BUG_INJECTION_INSTRUCTION  # Same instruction for all
 
     n_bugs    = max(1, state.get("num_bugs") or 1)
-    max_depth = _MAX_DEPTH_LEVEL.get(level, 2)
+    max_depth = target_nesting  # Use the requested nesting level
 
     candidate_files: list[str] = list(state.get("candidate_files") or [state["target_file"]])
     tried_files: set[str] = set()
@@ -1073,7 +1284,8 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
         with open(current_file, encoding="utf-8", errors="ignore") as _f:
             source = _f.read()
 
-        print(f"[sabotage_init] Trying file: {current_file}")
+        if debug_mode:
+            print(f"[sabotage_init] Trying file: {current_file}")
         all_previous_bugs: list[str] = []
         tried_surfaces: set[str] = set()
 
@@ -1098,28 +1310,108 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
             indirect_mode = bool(substantial)
             if substantial:
                 max_avail = max(substantial.values())
-                for target_depth in range(max_avail, 0, -1):
-                    pool = [h for h, d in substantial.items() if d == target_depth]
-                    if pool:
-                        break
-                bug_targets = random.sample(pool, min(n_bugs, len(pool)))
-                if n_bugs > len(pool):
-                    shallower = [h for h, d in substantial.items()
-                                 if d < target_depth and h not in bug_targets]
-                    if shallower:
-                        bug_targets += random.sample(shallower, min(n_bugs - len(pool), len(shallower)))
+                
+                # NEW DYNAMIC DEPTH STRATEGY:
+                # Instead of always picking the deepest functions, we'll pick from various depths
+                # and augment shorter chains to reach the target depth.
+                # This creates variety even when the same file/function is picked multiple times.
+                
+                # Collect candidates from all depths (not just max_avail)
+                depth_pools = {}
+                for h, d in substantial.items():
+                    if d not in depth_pools:
+                        depth_pools[d] = []
+                    depth_pools[d].append(h)
+                
+                # Weighted selection: prefer deeper chains but allow shallower ones too
+                # 60% chance for deep chains (>= max_depth-1), 40% for shallower
+                use_deep = random.random() < 0.6
+                
+                bug_targets = []
+                if use_deep and max_avail >= max_depth - 1:
+                    # Prefer deep chains
+                    for target_depth in range(max_avail, max(1, max_depth - 2), -1):
+                        if target_depth in depth_pools:
+                            pool = depth_pools[target_depth]
+                            verified_pool = []
+                            for candidate in pool:
+                                test_path = _find_call_path(call_graph, surface_func_name, candidate, max_depth)
+                                if len(test_path) - 1 == target_depth:
+                                    verified_pool.append((candidate, test_path))
+                            
+                            if verified_pool:
+                                selected = random.sample(verified_pool, min(n_bugs, len(verified_pool)))
+                                bug_targets = [(cand, path) for cand, path in selected]
+                                break
+                else:
+                    # Pick from shallower depths and augment them
+                    candidate_depths = sorted(depth_pools.keys())
+                    for target_depth in candidate_depths:
+                        if target_depth < max_depth - 1:  # Only pick shallow ones for augmentation
+                            pool = depth_pools[target_depth]
+                            if pool:
+                                selected_funcs = random.sample(pool, min(n_bugs, len(pool)))
+                                bug_targets = []
+                                for func in selected_funcs:
+                                    path = _find_call_path(call_graph, surface_func_name, func, max_depth)
+                                    bug_targets.append((func, path))
+                                break
+                
+                # If no targets selected, fall back to any substantial function
+                if not bug_targets:
+                    pool = list(substantial.keys())
+                    selected_funcs = random.sample(pool, min(n_bugs, len(pool)))
+                    bug_targets = []
+                    for func in selected_funcs:
+                        path = _find_call_path(call_graph, surface_func_name, func, max_depth)
+                        bug_targets.append((func, path))
+                
+                # Now augment chains that are too short
+                augmented_targets = []
+                for bug_func, original_chain in bug_targets:
+                    current_depth = len(original_chain) - 1
+                    if current_depth < max_depth:
+                        # Augment this chain!
+                        if debug_mode:
+                            print(f"[sabotage_init] Augmenting chain to '{bug_func}' from depth {current_depth} to {max_depth}")
+                        try:
+                            source, augmented_chain = _augment_chain_depth(
+                                source, original_chain, max_depth, module_func_nodes
+                            )
+                            # Re-parse to update module_func_nodes
+                            tree = ast.parse(source)
+                            for node in tree.body:
+                                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                                    if node.name not in module_func_nodes:
+                                        module_func_nodes[node.name] = node
+                            # Rebuild call graph with new functions
+                            call_graph = _build_call_graph(module_func_nodes)
+                            augmented_targets.append((bug_func, augmented_chain))
+                            if debug_mode:
+                                print(f"[sabotage_init]   Augmented chain: {' -> '.join(augmented_chain)}")
+                        except Exception as e:
+                            if debug_mode:
+                                print(f"[sabotage_init]   Augmentation failed: {e}, using original chain")
+                            augmented_targets.append((bug_func, original_chain))
+                    else:
+                        augmented_targets.append((bug_func, original_chain))
+                
+                # Extract just the function names and chains
+                bug_targets = [func for func, _ in augmented_targets]
+                bug_chains: dict[str, list[str]] = {
+                    func: chain for func, chain in augmented_targets
+                }
             else:
                 bug_targets = [surface_func_name]
+                bug_chains: dict[str, list[str]] = {
+                    surface_func_name: [surface_func_name]
+                }
 
-            bug_chains: dict[str, list[str]] = {
-                t: _find_call_path(call_graph, surface_func_name, t, max_depth)
-                for t in bug_targets
-            }
-
-            print(f"[sabotage_init] Outer attempt {outer}: surface='{surface_func_name}', "
-                  f"bug_targets={bug_targets}, max_depth={max_depth}, indirect={indirect_mode}")
-            for t, chain in bug_chains.items():
-                print(f"[sabotage_init]   chain to '{t}': {' -> '.join(chain)} (depth {len(chain)-1})")
+            if debug_mode:
+                print(f"[sabotage_init] Outer attempt {outer}: surface='{surface_func_name}', "
+                      f"bug_targets={bug_targets}, max_depth={max_depth}, indirect={indirect_mode}")
+                for t, chain in bug_chains.items():
+                    print(f"[sabotage_init]   chain to '{t}': {' -> '.join(chain)} (depth {len(chain)-1})")
 
             surface_source = ""
             if indirect_mode:
@@ -1146,10 +1438,12 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
                     instructions, llm, indirect_mode,
                     call_chain=bug_chains.get(bug_func_name),
                     previous_bugs=list(all_previous_bugs),
-                    level=level,
+                    target_nesting=target_nesting,
+                    debug_mode=debug_mode,
                 )
                 if new_source is None:
-                    print(f"[sabotage_init] Failed to sabotage '{bug_func_name}' -- retrying outer loop")
+                    if debug_mode:
+                        print(f"[sabotage_init] Failed to sabotage '{bug_func_name}' -- retrying outer loop")
                     failed = True
                     break
                 current_source = new_source
@@ -1162,64 +1456,113 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
             if failed or last_data is None:
                 continue
 
-            raw_cases = last_data.get("test_cases", [])
-            if not raw_cases:
-                print("[sabotage_init] GPT returned no test_cases -- retrying outer loop")
+            # Get public and secret test cases from AI response
+            raw_public_cases = last_data.get("test_cases_public", [])
+            raw_secret_cases = last_data.get("test_cases_secret", [])
+            
+            # Fallback: if old format, split the test_cases
+            if not raw_public_cases and not raw_secret_cases:
+                raw_all = last_data.get("test_cases", [])
+                mid = len(raw_all) // 2
+                raw_public_cases = raw_all[:mid] if mid > 0 else raw_all
+                raw_secret_cases = raw_all[mid:] if mid > 0 else []
+            
+            if not raw_public_cases and not raw_secret_cases:
+                if debug_mode:
+                    print("[sabotage_init] GPT returned no test cases -- retrying outer loop")
                 continue
 
-            verified_cases: list[dict] = []
-            first_fail_args = first_expected = first_actual = None
-            exec_possible = False
-
-            for tc in raw_cases:
+            # Verify public tests (simpler, for development)
+            verified_public: list[dict] = []
+            for tc in raw_public_cases:
                 args = tc.get("args", "()")
-
                 if "lambda" in args or "range(" in args or "<function" in args:
-                    print(f"[sabotage_init] Skipping case {args!r}: contains non-primitive (lambda/range)")
                     continue
-
                 try:
                     eval(args, {"__builtins__": {}})
-                except SyntaxError:
-                    print(f"[sabotage_init] Skipping case {args!r}: invalid tuple syntax (keyword args?)")
+                except:
                     continue
-                except Exception:
-                    pass
-
-                orig_ok, true_exp = _try_exec(source, surface_func_name, args,
-                                              file_path=current_file)
+                
+                orig_ok, true_exp = _try_exec(source, surface_func_name, args, file_path=current_file)
                 if not orig_ok:
-                    print(f"[sabotage_init] Skipping case {args!r}: original crashed -- {true_exp[:80]}")
                     continue
-
                 try:
                     eval(true_exp, {"__builtins__": __builtins__})
-                except Exception:
-                    print(f"[sabotage_init] Skipping case {args!r}: expected repr not a portable literal ({true_exp[:60]})")
+                except:
                     continue
-
-                sabot_ok, true_act = _try_exec(current_source, surface_func_name, args,
-                                               file_path=current_file)
+                
+                sabot_ok, true_act = _try_exec(current_source, surface_func_name, args, file_path=current_file)
                 if not sabot_ok:
-                    print(f"[sabotage_init] Skipping case {args!r}: sabotaged version crashed (not a value bug)")
                     continue
-
+                
+                verified_public.append({"args": args, "expected": true_exp})
+            
+            # Verify secret tests (harder, for final validation)  
+            verified_secret: list[dict] = []
+            first_fail_args = first_expected = first_actual = None
+            exec_possible = False
+            
+            for tc in raw_secret_cases:
+                args = tc.get("args", "()")
+                if "lambda" in args or "range(" in args or "<function" in args:
+                    continue
+                try:
+                    eval(args, {"__builtins__": {}})
+                except:
+                    continue
+                
+                orig_ok, true_exp = _try_exec(source, surface_func_name, args, file_path=current_file)
+                if not orig_ok:
+                    continue
+                try:
+                    eval(true_exp, {"__builtins__": __builtins__})
+                except:
+                    continue
+                
+                sabot_ok, true_act = _try_exec(current_source, surface_func_name, args, file_path=current_file)
+                if not sabot_ok:
+                    continue
+                
                 exec_possible = True
-                verified_cases.append({"args": args, "expected": true_exp})
-
+                verified_secret.append({"args": args, "expected": true_exp})
+                
                 if first_fail_args is None and true_exp != true_act:
                     first_fail_args, first_expected, first_actual = args, true_exp, true_act
+            
+            # Also check public tests for failures
+            if first_fail_args is None:
+                for tc in verified_public:
+                    _, act = _try_exec(current_source, surface_func_name, tc["args"], file_path=current_file)
+                    if tc["expected"] != act:
+                        first_fail_args = tc["args"]
+                        first_expected = tc["expected"]
+                        first_actual = act
+                        break
 
-            if not exec_possible:
-                print("[sabotage_init] Bug produces crashes instead of wrong values -- retrying outer loop.")
+            # Combine for total verification
+            verified_cases = verified_public + verified_secret
+
+            if not exec_possible and not verified_public:
+                if debug_mode:
+                    print("[sabotage_init] Bug produces crashes instead of wrong values -- retrying outer loop.")
                 continue
 
             if first_fail_args is None:
-                print("[sabotage_init] No test case exposes the bug after exec -- retrying outer loop")
+                if debug_mode:
+                    print("[sabotage_init] No test case exposes the bug after exec -- retrying outer loop")
                 continue
 
-            print(f"[sabotage_init] Verified {len(verified_cases)} test cases; "
-                  f"first failing: {first_fail_args} -> expected={first_expected}, got={first_actual}")
+            if debug_mode:
+                print(f"[sabotage_init] Verified {len(verified_public)} public tests and {len(verified_secret)} secret tests; "
+                      f"first failing: {first_fail_args} -> expected={first_expected}, got={first_actual}")
+
+            # Use the public/secret split from AI generation
+            public_tests = verified_public
+            secret_tests = verified_secret
+            
+            if debug_mode:
+                print(f"[sabotage_init] Using AI-generated split: {len(public_tests)} public tests (simpler), "
+                      f"{len(secret_tests)} secret tests (harder edge cases)")
 
             state["target_file"]     = current_file
             state["original_code"]   = source
@@ -1228,26 +1571,82 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
             state["test_args"]       = first_fail_args
             state["expected_output"] = first_expected
             state["actual_output"]   = first_actual
-            state["test_cases"]      = verified_cases
+            state["test_cases"]      = verified_cases  # All test cases
+            state["public_tests"]    = public_tests     # First 5 (for students to see)
+            state["secret_tests"]    = secret_tests     # Last 5 (hidden until final submission)
             state["bug_description"] = " | ".join(all_descriptions)
             state["bug_func_name"]   = all_data[0]["_debug_func_name"]  if all_data else ""
             state["bug_func_source"] = all_data[0]["_debug_sabot_func"] if all_data else ""
+            
+            # Store the call chain for debugging and documentation
+            # Format: {bug_function_name: [surface_func, ..., bug_func]}
+            state["call_chain"] = bug_chains
 
-            print(f"[sabotage_init] Surface: {surface_func_name}")
+            if debug_mode:
+                print(f"\n[sabotage_init] Surface: {surface_func_name}")
+                print(f"[sabotage_init] Bug(s): {state['bug_description']}")
+                print("\n" + "=" * 70)
+                print("CALL CHAIN VISUALIZATION (for debugging)")
+                print("=" * 70)
+                for t in bug_targets:
+                    chain = bug_chains.get(t, [surface_func_name, t])
+                    depth = len(chain) - 1
+                    print(f"\nBug Location: {t} (Depth: {depth})")
+                    print("Call Path:")
+                    for i, func in enumerate(chain):
+                        indent = "  " * i
+                        if i == 0:
+                            marker = "┌─"
+                        elif i == len(chain) - 1:
+                            marker = "└─"
+                        else:
+                            marker = "├─"
+                        
+                        if i == len(chain) - 1:
+                            print(f"{indent}{marker}> {func}  ⚠️ BUG HERE")
+                        else:
+                            print(f"{indent}{marker}> {func}")
+                            if i < len(chain) - 1:
+                                print(f"{indent}│")
+                print("\n" + "=" * 70 + "\n")
+            
+            # Generate detailed explanation for instructor
+            detailed_parts = []
+            detailed_parts.append("=" * 80)
+            detailed_parts.append("DETAILED EXPLANATION FOR INSTRUCTOR")
+            detailed_parts.append("=" * 80)
+            detailed_parts.append(f"\nTarget File: {current_file}")
+            detailed_parts.append(f"Surface Function: {surface_func_name}")
+            detailed_parts.append(f"Number of Bugs: {len(bug_targets)}")
+            detailed_parts.append(f"\nBug Locations:")
             for t in bug_targets:
                 chain = bug_chains.get(t, [surface_func_name, t])
-                print(f"[sabotage_init] Bug in '{t}' at depth {len(chain)-1}: {' -> '.join(chain)}")
-            print(f"[sabotage_init] Bug(s): {state['bug_description']}")
+                detailed_parts.append(f"  - Function: {t}")
+                detailed_parts.append(f"    Call Chain: {' -> '.join(chain)}")
+                detailed_parts.append(f"    Depth: {len(chain) - 1}")
+            detailed_parts.append(f"\nBug Description: {state['bug_description']}")
+            detailed_parts.append(f"\nFirst Failing Test:")
+            detailed_parts.append(f"  Args: {first_fail_args}")
+            detailed_parts.append(f"  Expected: {first_expected}")
+            detailed_parts.append(f"  Actual: {first_actual}")
+            detailed_parts.append(f"\nTest Case Summary:")
+            detailed_parts.append(f"  Total verified: {len(verified_cases)}")
+            detailed_parts.append(f"  Public tests: {len(public_tests)}")
+            detailed_parts.append(f"  Secret tests: {len(secret_tests)}")
+            detailed_parts.append("\n" + "=" * 80)
+            state["detailed_explanation"] = "\n".join(detailed_parts)
 
-            for target_data in all_data:
-                diff_str = _format_bug_diff(
-                    func_name        = target_data["_debug_func_name"],
-                    file_start_line  = target_data["_debug_start_line"],
-                    file_end_line    = target_data["_debug_end_line"],
-                    original_source  = target_data["_debug_func_source"],
-                    sabotaged_source = target_data["_debug_sabot_func"],
-                )
-                print(diff_str)
+            # Print detailed diff only in debug mode
+            if state.get("debug_mode", False):
+                for target_data in all_data:
+                    diff_str = _format_bug_diff(
+                        func_name        = target_data["_debug_func_name"],
+                        file_start_line  = target_data["_debug_start_line"],
+                        file_end_line    = target_data["_debug_end_line"],
+                        original_source  = target_data["_debug_func_source"],
+                        sabotaged_source = target_data["_debug_sabot_func"],
+                    )
+                    print(diff_str)
 
             return state
 
@@ -1263,27 +1662,63 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
     )
 
 
-def code_inflation(state: ArchitectState) -> ArchitectState:
-    """Phase 2 - Anti-Analysis Bloating: inflate the target file to 200+ lines with busy-work.
+def inflate_hierarchy(state: ArchitectState) -> ArchitectState:
+    """Phase 2 - Hierarchy Inflation: inflate ALL functions in the call chain to make debugging harder.
 
-    Adds redundant local variables, dummy helper calls, and dead-code blocks to make the
-    file long enough that the bug is hidden in a wall of code.  Uses readable names so
-    downstream level-specific naming passes can apply their own conventions on top.
-    Does NOT create deep call chains -- that is the job of obfuscation_level_2.
+    This inflates ONLY the functions in the actual call path from surface to bug location.
+    Each function in the chain is expanded with dummy code, redundant operations, and busy-work
+    to make it very difficult to spot where the bug actually is.
+
+    Uses readable names so downstream refactoring passes can apply their own conventions.
     """
     source = state["sabotaged_code"]
+    debug_mode = state.get("debug_mode", False)
     line_count = len(source.splitlines())
-    print(f"[code_inflation] Current line count: {line_count}")
+    if debug_mode:
+        print(f"[inflate_hierarchy] Current line count: {line_count}")
 
     target_func = state["function_name"]
-    chain = _chain_for_obfuscation(source, target_func)
-    chain_source, _ = _extract_chain_snippet(source, chain)
-    chain_lines = len(chain_source.splitlines())
-    print(f"[code_inflation] Chain line count: {chain_lines} (total file: {line_count})")
-
-    if chain_lines >= 200:
-        print("[code_inflation] Chain already 200+ lines -- skipping")
+    
+    # Get the call chains from state (set during sabotage_init)
+    bug_chains = state.get("call_chain", {})
+    if not bug_chains:
+        if debug_mode:
+            print("[inflate_hierarchy] No call chain found -- skipping")
         return state
+    
+    # Extract unique functions from all call chains
+    all_funcs = set()
+    for chain in bug_chains.values():
+        all_funcs.update(chain)
+    all_funcs = sorted(list(all_funcs))  # Convert to sorted list for consistency
+    
+    if not all_funcs:
+        if debug_mode:
+            print("[inflate_hierarchy] No functions in call chain -- skipping")
+        return state
+    
+    if debug_mode:
+        print(f"[inflate_hierarchy] Found {len(all_funcs)} functions in call chains to inflate: {all_funcs}")
+
+    # Extract all functions as a snippet
+    func_sources = []
+    for func_name in all_funcs:
+        try:
+            func_src, _, _ = _extract_function_source(source, func_name)
+            func_sources.append(func_src)
+        except Exception:
+            pass
+    
+    if not func_sources:
+        if debug_mode:
+            print("[inflate_hierarchy] Could not extract functions -- skipping")
+        return state
+    
+    chain_source = "\n\n".join(func_sources)
+    chain_lines = len(chain_source.splitlines())
+    if debug_mode:
+        print(f"[inflate_hierarchy] All functions combined: {chain_lines} lines")
+
     bug_fn  = state.get("bug_func_name", "")
     bug_src = state.get("bug_func_source", "")
 
@@ -1295,19 +1730,26 @@ def code_inflation(state: ArchitectState) -> ArchitectState:
     ) if bug_fn and bug_src else ""
 
     prompt = (
-        f"Inflate the following Python file so it contains AT LEAST 200 lines total.\n\n"
-        f"HOW TO INFLATE:\n"
-        f"  - Add redundant local variable assignments that look meaningful but do nothing\n"
-        f"      e.g.  _buf = len(data) * 1   or   _flag = not False\n"
-        f"  - Add dummy helper functions that do trivial busy-work (compute and discard)\n"
-        f"  - Add always-true conditional blocks around existing calls\n"
-        f"  - Use NORMAL, READABLE names for all new code\n\n"
+        f"Inflate ALL of the following Python functions to make debugging MUCH harder.\n\n"
+        f"INFLATION GOALS:\n"
+        f"  - Make EVERY function significantly longer (aim for 30-50+ lines each)\n"
+        f"  - NO function should remain simple (single return statement is NOT acceptable)\n"
+        f"  - Add redundant local variable assignments that look meaningful: _buf, _tmp, _state, _flag\n"
+        f"  - Add dummy computations: `_n = [x*0 for x in range(5)]`, `_c = len(data) * 1`\n"
+        f"  - Add calls to OTHER functions from this file (create a web of dependencies)\n"
+        f"  - Wrap logic in always-true conditional blocks: `if True:`, `if _flag == True:`\n"
+        f"  - Insert redundant loops that don't change behavior: `for _ in range(1): ...`\n"
+        f"  - Use NORMAL, READABLE names for all new code (inflation only, no obfuscation yet)\n"
+        f"  - MANDATORY: Inflate ALL {len(all_funcs)} functions equally -- no exceptions!\n\n"
         f"HARD RULES:\n"
         f"  - Keep ALL original function names and signatures unchanged\n"
         f"  - Do NOT fix any bugs -- preserve ALL existing logic exactly\n"
-        f"  - All new helper functions must contain REAL code, NOT bare `pass`\n"
+        f"  - Do NOT create nested functions (def inside def) -- all functions must be at module level\n"
+        f"  - If you need helper functions, define them separately at the module level, not inside other functions\n"
+        f"  - Every function you return must be SUBSTANTIALLY expanded (minimum 15+ lines)\n"
         f"  - Return ONLY the Python function definitions (def ...: ...) -- no imports, no markdown\n"
-        f"  - Include every new helper function you create\n"
+        f"  - Include every new helper function you create at module level\n"
+        f"  - The bug must remain hidden among all the inflated code\n"
         f"{bug_rule}\n"
         f"FUNCTIONS TO INFLATE:\n{chain_source}"
     )
@@ -1318,27 +1760,63 @@ def code_inflation(state: ArchitectState) -> ArchitectState:
         snippet = _strip_markdown_code(response.content)
         snip_tree = ast.parse(snippet)
 
+        # Check that all functions from the chain are present
         all_func_names = {n.name for n in ast.walk(snip_tree)
                           if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        
+        # Verify target function exists
         if target_func not in all_func_names:
-            print(f"[code_inflation] Inflation removed `{target_func}` -- reverting")
+            if debug_mode:
+                print(f"[inflate_hierarchy] Inflation removed `{target_func}` -- reverting")
             return state
+        
+        # Verify all chain functions are present
+        missing = set(all_funcs) - all_func_names
+        if missing:
+            if debug_mode:
+                print(f"[inflate_hierarchy] Warning: Missing functions after inflation: {missing}")
+        
+        # Check for nested functions (functions defined inside other functions)
+        for node in ast.walk(snip_tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                # Check if this function contains nested function definitions
+                for child in ast.walk(node):
+                    if child != node and isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        if debug_mode:
+                            print(f"[inflate_hierarchy] Nested function detected in '{node.name}' -- reverting")
+                        return state
+        
+        # Verify that each function in the chain was actually inflated (not just a single return)
+        for node in snip_tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in all_funcs:
+                # Count non-trivial statements (exclude docstrings)
+                body = node.body
+                if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                    body = body[1:]  # Skip docstring
+                
+                if len(body) < 5:  # Minimum 5 statements to be considered "inflated"
+                    if debug_mode:
+                        print(f"[inflate_hierarchy] Function '{node.name}' not sufficiently inflated ({len(body)} statements) -- reverting")
+                    return state
 
-        spliced = _splice_transforms_back(source, snippet, chain)
+        # Splice all functions back
+        spliced = _splice_transforms_back(source, snippet, all_funcs)
         new_count = len(spliced.splitlines())
-        print(f"[code_inflation] Inflated: chain {chain_lines}->{len(snippet.splitlines())} lines (file: {line_count}->{new_count})")
+        if debug_mode:
+            print(f"[inflate_hierarchy] Inflated: {chain_lines} -> {len(snippet.splitlines())} lines (file: {line_count} -> {new_count})")
         state["sabotaged_code"] = spliced
+        
     except Exception as e:
-        print(f"[code_inflation] Inflation failed: {e} -- keeping original")
+        if debug_mode:
+            print(f"[inflate_hierarchy] Inflation failed: {e} -- keeping original")
 
     return state
 
 
 def apply_obfuscation_level_2(state: ArchitectState) -> ArchitectState:
-    """Phase 3 - Deep Nesting (Level 2/3): 10+ call-depth spaghettification with readable names."""
-    level = state["difficulty_level"]
-    if level not in (2, 3):
-        print(f"[obfuscation_level_2] Level {level} -- skipping (not Level 2/3)")
+    """Phase 3 - Deep Nesting: spaghettification with readable names."""
+    if not state.get("refactoring_enabled", False):
+        print("[obfuscation_level_2] Refactoring disabled -- skipping")
         return state
 
     print("[obfuscation_level_2] Applying spaghettification (deep nesting, readable names)...")
@@ -1358,19 +1836,19 @@ def apply_obfuscation_level_2(state: ArchitectState) -> ArchitectState:
 
 
 def apply_obfuscation_level_1(state: ArchitectState) -> ArchitectState:
-    """Phase 4 - Semantic Stripping (Level 1/3): cryptic naming + 4-deep shadow wrappers."""
-    level = state["difficulty_level"]
-    if level not in (1, 3):
-        print(f"[obfuscation_level_1] Level {level} -- skipping (not Level 1/3)")
+    """Phase 4 - Semantic Stripping: cryptic naming + shadow wrappers."""
+    if not state.get("refactoring_enabled", False):
+        print("[obfuscation_level_1] Refactoring disabled -- skipping")
         return state
 
     print("[obfuscation_level_1] Applying full-file obfuscation (cryptic names, shadow wrappers)...")
     llm = ChatOpenAI(model="gpt-4o", temperature=0.7)
+    # Always use level=3 for maximum obfuscation when refactoring is enabled
     result = _obfuscate_full_file(
         state["sabotaged_code"],
         state["function_name"],
         llm,
-        level=level,
+        level=3,  # Maximum obfuscation
         verified_cases=state["test_cases"],
         file_path=state["target_file"],
         bug_func_name=state.get("bug_func_name") or None,

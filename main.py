@@ -34,21 +34,34 @@ def main() -> None:
     )
     parser.add_argument("github_url", help="Public GitHub repository URL to clone and sabotage.")
     parser.add_argument(
-        "--level", type=int, choices=[1, 2, 3], default=1,
-        help="Difficulty level: 1=Messy Code, 2=Spaghetti Logic, 3=Sensitive Code (default: 1)"
+        "--nesting-level", type=int, default=3,
+        help="Desired call-chain depth for bug placement (default: 3)"
     )
     parser.add_argument(
         "--num-bugs", type=int, default=1,
         help="Number of bugs to inject (default: 1)"
     )
+    parser.add_argument(
+        "--refactoring", action="store_true",
+        help="Apply code obfuscation and spaghettification (default: False, only inject bugs + inflate)"
+    )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Enable debug mode with verbose output and bug location comments (default: False)"
+    )
     args = parser.parse_args()
 
-    print(f"\n[architect] Starting — URL: {args.github_url}  Level: {args.level}  Bugs: {args.num_bugs}\n")
+    if args.debug:
+        print(f"\n[architect] Starting — URL: {args.github_url}  Nesting: {args.nesting_level}  Bugs: {args.num_bugs}  Refactoring: {args.refactoring}  Debug: ON\n")
+    else:
+        print(f"\n[architect] Generating challenge from {args.github_url}...\n")
 
     graph = build_graph()
     initial_state = {
         "github_url": args.github_url,
-        "difficulty_level": args.level,
+        "nesting_level": args.nesting_level,
+        "refactoring_enabled": args.refactoring,
+        "debug_mode": args.debug,
         "num_bugs": args.num_bugs,
         # remaining fields will be populated by graph nodes
         "clone_path": "",
@@ -60,9 +73,15 @@ def main() -> None:
         "expected_output": "",
         "actual_output": "",
         "bug_description": "",
+        "detailed_explanation": "",
         "challenge_summary": "",
         "test_cases": [],
+        "public_tests": [],
+        "secret_tests": [],
         "candidate_files": [],
+        "bug_func_name": "",
+        "bug_func_source": "",
+        "call_chain": [],
     }
 
     graph.invoke(initial_state)
