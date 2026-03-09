@@ -35,7 +35,23 @@ def deploy_challenge(state: ArchitectState) -> ArchitectState:
         for tc in tests:
             args_repr = tc.get("args", "()")
             exp_repr  = tc.get("expected", "None")
-            case_lines.append(f"    ({args_repr}, {exp_repr}),")
+            
+            # args_repr should be a properly formatted tuple literal from GPT
+            # However, GPT sometimes forgets the comma for single-element tuples
+            # e.g. ('hello') instead of ('hello',)
+            args_str = args_repr.strip()
+            
+            # Try to evaluate the args to check if it's actually a tuple
+            try:
+                evaluated = eval(args_str)
+                # If eval succeeds but result is NOT a tuple, wrap it
+                if not isinstance(evaluated, tuple):
+                    args_str = f"({args_str},)"
+            except:
+                # If eval fails, assume it's already correct format
+                pass
+            
+            case_lines.append(f"    ({args_str}, {exp_repr}),")
         cases_literal = "\n".join(case_lines) if case_lines else "    # No tests"
 
         return (
@@ -53,7 +69,7 @@ def deploy_challenge(state: ArchitectState) -> ArchitectState:
             "        try:\n"
             f"            result = {func}(*args)\n"
             "            ok = result == expected\n"
-            "            status = '✓ PASS' if ok else '✗ FAIL'\n"
+            "            status = '[PASS]' if ok else '[FAIL]'\n"
             "            passed += ok\n"
             "            print(f'  Test {i}: {status}')\n"
             "            if not ok:\n"
@@ -62,18 +78,18 @@ def deploy_challenge(state: ArchitectState) -> ArchitectState:
             "                print(f'           got      = {result}')\n"
             "        except Exception as exc:\n"
             "            crashed += 1\n"
-            "            print(f'  Test {i}: ✗ CRASH — {type(exc).__name__}: {exc}')\n"
+            "            print(f'  Test {i}: [CRASH] - {type(exc).__name__}: {exc}')\n"
             "            print(f'           args = {args!r}')\n\n"
             "    total = len(_TEST_CASES)\n"
             "    broken = total - passed\n"
             "    if passed == total:\n"
-            "        print(f'\\n🎉 ALL TESTS PASSED ({passed}/{total})!')\n"
+            "        print(f'\\n=== ALL TESTS PASSED ({passed}/{total}) ===')\n"
             "        return True\n"
             "    elif crashed == total:\n"
-            "        print(f'\\n❌ ALL TESTS CRASHED ({crashed}/{total})')\n"
+            "        print(f'\\n=== ALL TESTS CRASHED ({crashed}/{total}) ===')\n"
             "        return False\n"
             "    else:\n"
-            "        print(f'\\n❌ {broken}/{total} tests failed ({crashed} crash, {broken-crashed} wrong value)')\n"
+            "        print(f'\\n=== {broken}/{total} tests failed ({crashed} crash, {broken-crashed} wrong value) ===')\n"
             "        return False\n\n"
             "if __name__ == '__main__':\n"
             "    run_tests()\n"

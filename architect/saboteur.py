@@ -491,7 +491,10 @@ def _format_bug_diff(
 
     header = (
         f"\n  ┌─ BUG INJECTED INTO: {func_name} "
-        f"(file lines {file_start_line + 1}–{file_end_line})\n"
+        f"(file lines {file_start_line + 1}–{file_end_line} - BEFORE inflation)\n"
+        f"  │\n"
+        f"  │  NOTE: Line numbers shown are BEFORE function inflation.\n"
+        f"  │        In the final file, functions will be expanded (50+ lines each).\n"
         f"  │"
     )
     diff_lines = []
@@ -1732,21 +1735,43 @@ def inflate_hierarchy(state: ArchitectState) -> ArchitectState:
     prompt = (
         f"Inflate ALL of the following Python functions to make debugging MUCH harder.\n\n"
         f"INFLATION GOALS:\n"
-        f"  - Make EVERY function significantly longer (aim for 30-50+ lines each)\n"
+        f"  - Make EVERY function VERY LONG (aim for 50-80+ lines each, more is better!)\n"
         f"  - NO function should remain simple (single return statement is NOT acceptable)\n"
-        f"  - Add redundant local variable assignments that look meaningful: _buf, _tmp, _state, _flag\n"
-        f"  - Add dummy computations: `_n = [x*0 for x in range(5)]`, `_c = len(data) * 1`\n"
-        f"  - Add calls to OTHER functions from this file (create a web of dependencies)\n"
-        f"  - Wrap logic in always-true conditional blocks: `if True:`, `if _flag == True:`\n"
-        f"  - Insert redundant loops that don't change behavior: `for _ in range(1): ...`\n"
+        f"  - Add MANY redundant local variable assignments: _buf, _tmp, _state, _flag, _cache, _context, _metadata\n"
+        f"  - Add MULTIPLE dummy computations in each function:\n"
+        f"      * `_n = [x*0 for x in range(5)]`\n"
+        f"      * `_c = len(data) * 1`\n"
+        f"      * `_hash = hash(str(data)) % 999999`\n"
+        f"      * `_checksum = sum(ord(c) for c in str(data)[:10])`\n"
+        f"      * `_marker = len(str(_hash)) - len(str(_hash))`\n"
+        f"  - Add SEVERAL realistic-looking validation checks:\n"
+        f"      * `if data is None: return None`\n"
+        f"      * `if not isinstance(x, str): x = str(x)`\n"
+        f"      * `if not data: return default_value`\n"
+        f"      * Type checking: `if not isinstance(count, int): count = int(count)`\n"
+        f"  - Wrap logic in MULTIPLE nested always-true conditional blocks:\n"
+        f"      * `if True:`, `if _flag == True:`, `if len(_tmp) >= 0:`\n"
+        f"      * Create nested if statements (3-4 levels deep)\n"
+        f"  - Insert MULTIPLE redundant loops: `for _ in range(1): ...`, `while False: break`\n"
+        f"  - Add SEVERAL try-except-finally blocks throughout each function\n"
+        f"  - Add MANY logging-style comments: `# Processing data`, `# Validate input`, `# Calculate result`, `# Initialize state`, `# Cleanup resources`\n"
+        f"  - Add intermediate result variables even when not needed: `_intermediate_1 = step1()`, `_intermediate_2 = process(_intermediate_1)`\n"
         f"  - Use NORMAL, READABLE names for all new code (inflation only, no obfuscation yet)\n"
         f"  - MANDATORY: Inflate ALL {len(all_funcs)} functions equally -- no exceptions!\n\n"
+        f"STRICTLY FORBIDDEN PATTERNS:\n"
+        f"  - NEVER create simple nested return chains like:\n"
+        f"      return execute_core(args)\n"
+        f"      return apply_transformations(args)\n"
+        f"      return normalize_arguments(args)\n"
+        f"  - NEVER just forward arguments through multiple trivial helper functions\n"
+        f"  - Such patterns are TOO OBVIOUS and defeat the purpose of inflation\n"
+        f"  - Instead, add REAL logic between operations: variable assignments, conditions, loops, validations\n\n"
         f"HARD RULES:\n"
         f"  - Keep ALL original function names and signatures unchanged\n"
         f"  - Do NOT fix any bugs -- preserve ALL existing logic exactly\n"
         f"  - Do NOT create nested functions (def inside def) -- all functions must be at module level\n"
         f"  - If you need helper functions, define them separately at the module level, not inside other functions\n"
-        f"  - Every function you return must be SUBSTANTIALLY expanded (minimum 15+ lines)\n"
+        f"  - Every function you return must be SUBSTANTIALLY expanded (MINIMUM 30+ lines, aim for 50-80+)\n"
         f"  - Return ONLY the Python function definitions (def ...: ...) -- no imports, no markdown\n"
         f"  - Include every new helper function you create at module level\n"
         f"  - The bug must remain hidden among all the inflated code\n"
@@ -1794,7 +1819,7 @@ def inflate_hierarchy(state: ArchitectState) -> ArchitectState:
                 if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
                     body = body[1:]  # Skip docstring
                 
-                if len(body) < 5:  # Minimum 5 statements to be considered "inflated"
+                if len(body) < 8:  # Minimum 8 statements to be considered "inflated"
                     if debug_mode:
                         print(f"[inflate_hierarchy] Function '{node.name}' not sufficiently inflated ({len(body)} statements) -- reverting")
                     return state
