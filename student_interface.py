@@ -675,19 +675,167 @@ def _expected_fix_diff_html(cs: "ChallengeState", submitted_code: str = "") -> s
             "</div>"
         )
     else:
-        # Show all changes across the whole workspace so the student can see
-        # both incorrect target-file changes and changes to other files.
-        workspace_diff = _workspace_diff_html(cs)
         verdict = (
-            "<h4 style='color:#94a3b8;margin:16px 0 4px;'>⚠️ Your changes vs expected fix</h4>"
-            "<p style='color:#f59e0b;font-size:0.85em;margin:0 0 6px;'>"
-            "Your changes differ from the minimal expected fix. "
-            "Red lines were expected but missing or changed; "
-            "green lines are extra changes.</p>"
-            + workspace_diff
+            "<div style='margin-top:12px;padding:10px 14px;background:#2d1a00;"
+            "border:1px solid #f59e0b;border-radius:6px;color:#f59e0b;font-weight:600;'>"
+            "⚠️ Your fix differs from the expected solution — see Your Changes on the left."
+            "</div>"
         )
 
     return section1 + verdict
+
+
+def _combined_changes_html(cs: "ChallengeState", submitted_code: str = "") -> str:
+    """
+    Render the "Changes & Expected" tab as a single HTML block.
+
+    For each file in the union of (student-changed files ∪ expected-fix files),
+    a row is rendered with two side-by-side diff panels:
+      - Left:  student's diff (vs received sabotaged code)
+      - Right: expected fix diff (vs received sabotaged code)
+    If one side has no changes for a given file, a "No changes" placeholder is shown.
+    A verdict banner spans the full width at the bottom.
+    """
+    import subprocess as _sp
+
+    workspace = cs.workspace.resolve()
+    try:
+        target_rel = cs.target_path.resolve().relative_to(workspace).as_posix()
+    except ValueError:
+        target_rel = ""
+
+    sabotaged_files = cs.sabotaged_files
+    received_code   = sabotaged_files.get(target_rel) or cs.sabotaged_code
+
+    # ── Collect student-changed files ─────────────────────────────────────────
+    # student_changes: {rel_posix: (received_content, current_content)}
+    student_changes: dict[str, tuple[str, str]] = {}
+
+    for rel_posix, received_content in sabotaged_files.items():
+        full_path = workspace / rel_posix
+        if not full_path.exists():
+            continue
+        current = full_path.read_text(encoding="utf-8")
+        if _normalize(current) != _normalize(received_content):
+            student_changes[rel_posix] = (received_content, current)
+
+    try:
+        proc = _sp.run(
+            ["git", "diff", "HEAD", "--name-only"],
+            cwd=str(workspace), capture_output=True, text=True,
+            encoding="utf-8", timeout=10,
+        )
+        for changed_rel in proc.stdout.splitlines():
+            changed_posix = changed_rel.replace("\\", "/")
+            if changed_posix in sabotaged_files:
+                continue
+            if not changed_rel.endswith(".py"):
+                continue
+            orig_proc = _sp.run(
+                ["git", "show", f"HEAD:{changed_rel}"],
+                cwd=str(workspace), capture_output=True, text=True,
+                encoding="utf-8", timeout=10,
+            )
+            if orig_proc.returncode != 0:
+                continue
+            full_path = workspace / changed_rel
+            if not full_path.exists():
+                continue
+            current = full_path.read_text(encoding="utf-8")
+            if _normalize(current) != _normalize(orig_proc.stdout):
+                student_changes[changed_posix] = (orig_proc.stdout, current)
+    except Exception:
+        pass
+
+    # ── Compute expected fix for target file ──────────────────────────────────
+    expected_fixed = _compute_expected_fixed_code(cs)
+    if expected_fixed is None and cs.bug_func_name:
+        sabot_func = _extract_function_source(received_code, cs.bug_func_name)
+        orig_func  = _extract_function_source(cs.original_code, cs.bug_func_name)
+        if sabot_func and orig_func:
+            ef = received_code.replace(sabot_func, orig_func, 1)
+            if ef != received_code:
+                expected_fixed = ef
+
+    # ── Build union of files to show ──────────────────────────────────────────
+    expected_files = {target_rel} if (target_rel and expected_fixed is not None) else set()
+    all_files = sorted(set(student_changes.keys()) | expected_files)
+
+    # ── Column header row ─────────────────────────────────────────────────────
+    col_headers = (
+        "<div style='display:flex;gap:12px;margin-bottom:8px;'>"
+        "<div style='flex:1;min-width:0;font-weight:600;color:#cbd5e1;'>✏️ Your Changes"
+        " <span style='font-weight:400;color:#64748b;font-size:0.88em;'>"
+        "— your submitted code vs the buggy code you received</span></div>"
+        "<div style='flex:1;min-width:0;font-weight:600;color:#cbd5e1;'>🎯 Expected Fix"
+        " <span style='font-weight:400;color:#64748b;font-size:0.88em;'>"
+        "— the minimal correct fix</span></div>"
+        "</div>"
+    )
+
+    if not all_files:
+        return col_headers + "<div class='diff-block' style='color:#22c55e;'>No changes detected in workspace.</div>"
+
+    _no_change_left  = "<div class='diff-block' style='color:#22c55e;'>No changes</div>"
+    _no_change_right = "<div class='diff-block' style='color:#64748b;'>No change expected</div>"
+
+    # ── Per-file side-by-side rows ────────────────────────────────────────────
+    rows: list[str] = []
+    for rel in all_files:
+        file_header = (
+            f"<h4 style='color:#94a3b8;margin:6px 0 4px;font-family:monospace;'>📄 {rel}</h4>"
+        )
+
+        # Left: student's changes
+        if rel in student_changes:
+            recv, curr = student_changes[rel]
+            left_body = _diff_html(recv, curr, rel, rel)
+        else:
+            left_body = _no_change_left
+
+        # Right: expected fix (only for the sabotaged target file)
+        if rel == target_rel and expected_fixed is not None:
+            right_body = _diff_html(received_code, expected_fixed, rel, rel)
+        else:
+            right_body = _no_change_right
+
+        rows.append(
+            "<div style='display:flex;gap:12px;margin-bottom:20px;'>"
+            f"<div style='flex:1;min-width:0;'>{file_header}{left_body}</div>"
+            f"<div style='flex:1;min-width:0;'>{file_header}{right_body}</div>"
+            "</div>"
+        )
+
+    # ── Verdict banner (full-width) ───────────────────────────────────────────
+    verdict = ""
+    if submitted_code:
+        def _ast_eq(a: str, b: str) -> bool:
+            try:
+                import ast as _ast
+                return _ast.dump(_ast.parse(a)) == _ast.dump(_ast.parse(b))
+            except SyntaxError:
+                return _normalize(a) == _normalize(b)
+
+        target_ok    = expected_fixed is not None and _ast_eq(expected_fixed, submitted_code)
+        extra_files  = [f for f in student_changes if f != target_rel]
+        is_perfect   = target_ok and not extra_files
+
+        if is_perfect:
+            verdict = (
+                "<div style='margin-top:12px;padding:10px 14px;background:#052e16;"
+                "border:1px solid #22c55e;border-radius:6px;color:#22c55e;font-weight:600;'>"
+                "✅ Perfect fix — you changed exactly the right lines and nothing more."
+                "</div>"
+            )
+        else:
+            verdict = (
+                "<div style='margin-top:12px;padding:10px 14px;background:#2d1a00;"
+                "border:1px solid #f59e0b;border-radius:6px;color:#f59e0b;font-weight:600;'>"
+                "⚠️ Your fix differs from the expected solution."
+                "</div>"
+            )
+
+    return col_headers + "".join(rows) + verdict
 
 
 def _hints_html(history: list) -> str:
@@ -868,6 +1016,8 @@ def create_full_interface() -> gr.Blocks:
                             with gr.Row():
                                 btn_tests   = gr.Button("▶ Run Tests",        variant="secondary")
                                 btn_changes = gr.Button("👁️ View My Changes", variant="secondary")
+                                save_btn    = gr.Button("💾 Save",             variant="secondary", elem_id="save-btn")
+                            save_status = gr.Markdown("")
                             code_editor = gr.Code(
                                 value="",
                                 language="python",
@@ -876,21 +1026,19 @@ def create_full_interface() -> gr.Blocks:
                                 lines=30,
                                 elem_id="code-editor",
                             )
-                            save_status = gr.Markdown("")
-                            save_btn = gr.Button("💾 Save", variant="secondary", elem_id="save-btn")
 
                         with gr.Tab("🧪 Test Results", id=2):
+                            run_tests_tab_btn = gr.Button("▶ Run Tests", variant="secondary")
                             test_output = gr.HTML(
                                 "<p style='color:#888;font-family:monospace;'>Click '▶ Run Tests' to run…</p>"
                             )
-                            run_tests_tab_btn = gr.Button("▶ Run Tests", variant="secondary")
 
                         with gr.Tab("👁️ My Changes", id=3):
                             gr.Markdown("_Diff: your saved file vs the original buggy code you received_")
-                            changes_diff_html = gr.HTML("")
                             with gr.Row():
                                 refresh_btn = gr.Button("🔄 Refresh", variant="secondary")
                                 revert_btn  = gr.Button("↩️ Revert to Original", variant="secondary")
+                            changes_diff_html = gr.HTML("")
 
                 # ── Right column: AI assistant + submit ───────────────────
                 with gr.Column(scale=2, elem_classes=["right-col"]):
@@ -922,13 +1070,8 @@ def create_full_interface() -> gr.Blocks:
                 with gr.Tab("🧪 Test Results"):
                     results_test_html = gr.HTML("")
 
-                with gr.Tab("✏️ Your Changes"):
-                    gr.Markdown("_Diff: your submitted code vs the original buggy code you received_")
-                    results_your_diff_html = gr.HTML("")
-
-                with gr.Tab("🔍 Expected Fix"):
-                    gr.Markdown("_Diff: what the original correct code looks like vs the buggy version_")
-                    results_expected_diff_html = gr.HTML("")
+                with gr.Tab("🔍 Changes & Expected"):
+                    results_changes_html = gr.HTML("")
 
                 with gr.Tab("💡 Hints Used"):
                     results_hints_html = gr.HTML("")
@@ -1044,11 +1187,11 @@ def create_full_interface() -> gr.Blocks:
             yield (
                 gr.update(visible=False),
                 gr.update(visible=True),
-                _loading, "", "", "", "",
+                _loading, "", "", "",
                 submit_count,
             )
             if not workspace_path:
-                yield (gr.update(), gr.update(), "No challenge loaded.", "", "", "", "", submit_count)
+                yield (gr.update(), gr.update(), "No challenge loaded.", "", "", "", submit_count)
                 return
             try:
                 cs  = ChallengeState(workspace_path)
@@ -1067,20 +1210,19 @@ def create_full_interface() -> gr.Blocks:
                 log.save(submitted_code, result, hints_used)
                 new_count = submit_count + 1
 
-                score_html    = _score_summary_html(result)
-                your_diff     = _workspace_diff_html(cs)
-                expected_diff = _expected_fix_diff_html(cs, submitted_code)
-                test_html     = _colorise_test_output(result["test_output"] or "No test output.")
-                hints_html    = _hints_html(history or [])
+                score_html     = _score_summary_html(result)
+                combined_diff  = _combined_changes_html(cs, submitted_code)
+                test_html      = _colorise_test_output(result["test_output"] or "No test output.")
+                hints_html     = _hints_html(history or [])
 
                 yield (
                     gr.update(), gr.update(),
-                    score_html, your_diff, expected_diff, test_html, hints_html,
+                    score_html, combined_diff, test_html, hints_html,
                     new_count,
                 )
             except Exception as exc:
                 err = f"<p style='color:#ef4444;padding:20px;font-family:monospace;'>❌ Error during evaluation:<br>{exc}</p>"
-                yield (gr.update(), gr.update(), err, "", "", "", "", submit_count)
+                yield (gr.update(), gr.update(), err, "", "", "", submit_count)
 
         def on_send(message, history, hints_used, submit_count, workspace_path):
             if not message.strip():
@@ -1133,8 +1275,7 @@ def create_full_interface() -> gr.Blocks:
             outputs=[
                 challenge_page, results_page,
                 score_summary_html,
-                results_your_diff_html,
-                results_expected_diff_html,
+                results_changes_html,
                 results_test_html,
                 results_hints_html,
                 submission_count_state,
@@ -1196,25 +1337,25 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
                             with gr.Row():
                                 btn_tests   = gr.Button("▶ Run Tests",        variant="secondary")
                                 btn_changes = gr.Button("👁️ View My Changes", variant="secondary")
+                                save_btn    = gr.Button("💾 Save",             variant="secondary", elem_id="save-btn")
+                            save_status = gr.Markdown("")
                             code_editor = gr.Code(
                                 value=cs.read_target(), language="python", label=cs.target_file,
                                 interactive=True, lines=30, elem_id="code-editor",
                             )
-                            save_status = gr.Markdown("")
-                            save_btn = gr.Button("💾 Save", variant="secondary", elem_id="save-btn")
 
                         with gr.Tab("🧪 Test Results", id=2):
+                            run_tests_tab_btn = gr.Button("▶ Run Tests", variant="secondary")
                             test_output = gr.HTML(
                                 "<p style='color:#888;font-family:monospace;'>Click '▶ Run Tests' to run…</p>"
                             )
-                            run_tests_tab_btn = gr.Button("▶ Run Tests", variant="secondary")
 
                         with gr.Tab("👁️ My Changes", id=3):
                             gr.Markdown("_Diff: your saved file vs the original buggy code you received_")
-                            changes_diff_html = gr.HTML("")
                             with gr.Row():
                                 refresh_btn = gr.Button("🔄 Refresh", variant="secondary")
                                 revert_btn  = gr.Button("↩️ Revert to Original", variant="secondary")
+                            changes_diff_html = gr.HTML("")
 
                 with gr.Column(scale=2, elem_classes=["right-col"]):
                     hint_counter = gr.Markdown(_hint_md(0, 0))
@@ -1240,12 +1381,10 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
             with gr.Tabs():
                 with gr.Tab("🧪 Test Results"):
                     results_test_html = gr.HTML("")
-                with gr.Tab("✏️ Your Changes"):
-                    gr.Markdown("_Diff: your submitted code vs the original buggy code_")
-                    results_your_diff_html = gr.HTML("")
-                with gr.Tab("🔍 Expected Fix"):
-                    gr.Markdown("_Diff: what the correct original code looks like vs the buggy version_")
-                    results_expected_diff_html = gr.HTML("")
+
+                with gr.Tab("🔍 Changes & Expected"):
+                    results_changes_html = gr.HTML("")
+
                 with gr.Tab("💡 Hints Used"):
                     results_hints_html = gr.HTML("")
 
@@ -1282,7 +1421,7 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
             yield (
                 gr.update(visible=False),
                 gr.update(visible=True),
-                _loading, "", "", "", "",
+                _loading, "", "", "",
                 submit_count,
             )
             try:
@@ -1301,19 +1440,18 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
                 new_count = submit_count + 1
 
                 score_html    = _score_summary_html(result)
-                your_diff     = _workspace_diff_html(cs)
-                expected_diff = _expected_fix_diff_html(cs, submitted_code)
+                combined_diff = _combined_changes_html(cs, submitted_code)
                 test_html     = _colorise_test_output(result["test_output"] or "No test output.")
                 hints_html    = _hints_html(history or [])
 
                 yield (
                     gr.update(), gr.update(),
-                    score_html, your_diff, expected_diff, test_html, hints_html,
+                    score_html, combined_diff, test_html, hints_html,
                     new_count,
                 )
             except Exception as exc:
                 err = f"<p style='color:#ef4444;padding:20px;font-family:monospace;'>❌ Error during evaluation:<br>{exc}</p>"
-                yield (gr.update(), gr.update(), err, "", "", "", "", submit_count)
+                yield (gr.update(), gr.update(), err, "", "", "", submit_count)
 
         def on_send(message, history, hints_used, submit_count):
             if not message.strip():
@@ -1352,8 +1490,7 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
             outputs=[
                 challenge_col, results_col,
                 score_summary_html,
-                results_your_diff_html,
-                results_expected_diff_html,
+                results_changes_html,
                 results_test_html,
                 results_hints_html,
                 submission_count_state,
