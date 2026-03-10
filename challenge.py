@@ -5,7 +5,8 @@ Usage (GUI setup page):
     python challenge.py [--port 7860] [--share]
 
 Usage (skip setup, run directly):
-    python challenge.py <github_url> [--level 1|2|3] [--num-bugs N] [--name "Alice"] [--port 7860] [--share]
+    python challenge.py <github_url> --name "Alice" [--nesting-level 3] [--num-bugs N]
+                        [--refactoring] [--debug] [--timer N] [--port 7860] [--share]
 
 If github_url is provided the setup page is skipped: the pipeline runs
 immediately and the challenge interface opens directly.
@@ -52,24 +53,32 @@ def main() -> None:
         help="GitHub repo URL. If given, skip the setup page and run immediately.",
     )
     parser.add_argument(
-        "--level", type=int, choices=[1, 2, 3], default=1,
-        help="Difficulty level (default: 1). Only used when github_url is provided.",
+        "--name", type=str, default="",
+        help="Student name shown in the header. Required when github_url is provided.",
+    )
+    parser.add_argument(
+        "--nesting-level", type=int, choices=range(1, 7), default=3, metavar="1-6",
+        help="Call-chain depth for bug hiding (default: 3). Only used when github_url is provided.",
     )
     parser.add_argument(
         "--num-bugs", type=int, default=1,
         help="Number of bugs to inject (default: 1). Only used when github_url is provided.",
     )
     parser.add_argument(
-        "--name", type=str, default="",
-        help="Student name shown in the header. Only used when github_url is provided.",
+        "--refactoring", action="store_true",
+        help="Enable refactoring/obfuscation transforms. Only used when github_url is provided.",
     )
     parser.add_argument(
-        "--port", type=int, default=7860,
-        help="Port for the Gradio GUI (default: 7860).",
+        "--debug", action="store_true",
+        help="Debug mode — verbose output, show bug locations. Only used when github_url is provided.",
     )
     parser.add_argument(
         "--timer", type=int, default=0,
         help="Countdown timer in minutes (0 = no timer). Only used when github_url is provided.",
+    )
+    parser.add_argument(
+        "--port", type=int, default=7860,
+        help="Port for the Gradio GUI (default: 7860).",
     )
     parser.add_argument(
         "--share", action="store_true",
@@ -92,11 +101,13 @@ def main() -> None:
             parser.error("--name is required when providing a GitHub URL (e.g. --name 'Alice Smith')")
         print(
             f"\n[challenge] CLI mode — URL: {args.github_url}  "
-            f"Level: {args.level}  Bugs: {args.num_bugs}  Name: {args.name}\n"
+            f"Nesting: {args.nesting_level}  Bugs: {args.num_bugs}  "
+            f"Refactoring: {args.refactoring}  Debug: {args.debug}  Name: {args.name}\n"
         )
         print("[challenge] Running pipeline…")
         workspace_path = student_interface._run_pipeline(
-            args.github_url.strip(), args.level, args.num_bugs
+            args.github_url.strip(), args.nesting_level, args.num_bugs,
+            refactoring_enabled=args.refactoring, debug_mode=args.debug,
         )
         print(f"[challenge] Workspace ready: {workspace_path}")
         print(f"[challenge] Opening http://localhost:{args.port}\n")

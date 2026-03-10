@@ -39,10 +39,42 @@ class ChallengeState:
         self.original_code:    str  = data.get("original_code", "")
         self.sabotaged_code:   str  = data.get("sabotaged_code", "")
         self.function_name:    str  = data.get("function_name", "")
-        self.bug_func_name:    str  = data.get("bug_func_name", "")
+        self.bug_func_name:           str  = data.get("bug_func_name", "")
+        self.original_bug_func_source: str  = data.get("original_bug_func_source", "")
         self.nesting_level:    int  = data.get("nesting_level", 3)
         self.refactoring_enabled: bool = data.get("refactoring_enabled", False)
         self.debug_mode:       bool = data.get("debug_mode", False)
+
+        # sabotaged_files: {rel_posix_path: content} for every file the
+        # saboteur touched.  Primary source: .challenge_snapshot/ directory
+        # written by the deployer immediately after sabotage (always up-to-date).
+        # Fallback: sabotaged_files dict in JSON, then single sabotaged_code field.
+        snapshot_dir = self.workspace / ".challenge_snapshot"
+        snap_files: dict[str, str] = {}
+        if snapshot_dir.exists():
+            for snap_path in snapshot_dir.iterdir():
+                if snap_path.is_file():
+                    # filename encodes the relative path: separators replaced by __
+                    rel_posix = snap_path.name.replace("__", "/")
+                    try:
+                        snap_files[rel_posix] = snap_path.read_text(encoding="utf-8")
+                    except Exception:
+                        pass
+
+        if snap_files:
+            self.sabotaged_files: dict[str, str] = snap_files
+        else:
+            # Fall back to JSON fields
+            stored = data.get("sabotaged_files", {})
+            if not stored and self.sabotaged_code:
+                try:
+                    rel = Path(self.target_file).resolve().relative_to(
+                        self.workspace.resolve()
+                    ).as_posix()
+                except ValueError:
+                    rel = Path(self.target_file).name
+                stored = {rel: self.sabotaged_code}
+            self.sabotaged_files = stored
 
     @property
     def target_path(self) -> Path:
@@ -150,16 +182,37 @@ def _run_pipeline(github_url: str, nesting_level: int, num_bugs: int,
 
     workspace_path = result["clone_path"]
 
+    # Read the actual file on disk (may differ from state if extra transforms ran)
+    target_file_rel = result.get("target_file", "")
+    actual_sabotaged_code = result.get("sabotaged_code", "")
+    workspace_path_obj = Path(workspace_path).resolve()
+    if target_file_rel:
+        target_path = Path(workspace_path) / target_file_rel
+        if target_path.exists():
+            actual_sabotaged_code = target_path.read_text(encoding="utf-8")
+
+    # Build sabotaged_files: {rel_posix_path: content} for every file the
+    # saboteur modified.  Currently always one file (target_file).
+    sabotaged_files: dict[str, str] = {}
+    if target_file_rel and actual_sabotaged_code:
+        try:
+            rel_posix = Path(target_file_rel).resolve().relative_to(workspace_path_obj).as_posix()
+        except (ValueError, OSError):
+            rel_posix = Path(target_file_rel).as_posix()
+        sabotaged_files[rel_posix] = actual_sabotaged_code
+
     # Persist challenge_state.json
     challenge_state = {
         "github_url":          github_url,
         "workspace_path":      workspace_path,
-        "target_file":         result.get("target_file",      ""),
+        "target_file":         target_file_rel,
         "original_code":       result.get("original_code",    ""),
-        "sabotaged_code":      result.get("sabotaged_code",   ""),
+        "sabotaged_code":      actual_sabotaged_code,
+        "sabotaged_files":     sabotaged_files,
         "function_name":       result.get("function_name",    ""),
         "bug_func_name":       result.get("bug_func_name",    ""),
-        "bug_func_source":     result.get("bug_func_source",  ""),
+        "bug_func_source":          result.get("bug_func_source",           ""),
+        "original_bug_func_source": result.get("original_bug_func_source",  ""),
         "test_cases":          result.get("test_cases",       []),
         "public_tests":        result.get("public_tests",     []),
         "secret_tests":        result.get("secret_tests",     []),
@@ -182,7 +235,14 @@ PENALTY_TABLE = [0, 2, 6, 12, 20, 30]
 # Sets dark mode as the default on first visit and defines window.startTimer.
 def _make_js(timer_minutes: int = 0) -> str:
     auto_start = (
-        f"\n    setTimeout(() => {{ window.startTimer({timer_minutes}); }}, 500);"
+        f"""
+    (function tryStartTimer() {{
+        if (document.getElementById('timer-inner')) {{
+            window.startTimer({timer_minutes});
+        }} else {{
+            setTimeout(tryStartTimer, 150);
+        }}
+    }})();"""
         if timer_minutes > 0 else ""
     )
     return """() => {
@@ -197,7 +257,7 @@ def _make_js(timer_minutes: int = 0) -> str:
             const remaining = Math.max(0, endTime - Date.now());
             const m = Math.floor(remaining / 60000);
             const s = Math.floor((remaining % 60000) / 1000);
-            const el = document.getElementById('challenge-timer');
+            const el = document.getElementById('timer-inner');
             if (!el) return;
             if (remaining === 0) {
                 el.innerHTML = '<span style="color:#ef4444;font-weight:bold;font-size:1.1em;">⏱️ TIME\\'S UP!</span>';
@@ -210,7 +270,14 @@ def _make_js(timer_minutes: int = 0) -> str:
         }
         tick();
         window._timerInterval = setInterval(tick, 1000);
-    };""" + auto_start + "\n}"
+    };
+    document.addEventListener('keydown', function(e) {
+        if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+            e.preventDefault();
+            const btn = document.getElementById('save-btn');
+            if (btn) btn.click();
+        }
+    }, true);""" + auto_start + "\n}"
 
 
 _JS = _make_js(0)
@@ -238,43 +305,15 @@ footer svg { display: inline !important; }
               border-radius: 8px; overflow-y: auto; max-height: 45vh;
               white-space: pre; background: #1e1e1e; color: #d4d4d4; }
 
-/* Challenge timer — right-aligned in header row */
-#challenge-timer { text-align: right; padding: 6px 8px; font-family: monospace; min-width: 120px; }
-.header-row { align-items: center !important; }
+/* Challenge timer — pushed to the right corner of the header */
+.header-row { display: flex !important; align-items: center !important;
+              width: 100% !important; gap: 8px; }
+.header-row > * { flex-shrink: 0 !important; }
+.header-row > *:first-child { flex: 1 1 auto !important; min-width: 0; }
+#challenge-timer { flex: 0 0 auto !important; font-family: monospace;
+                   font-size: 1em; text-align: right; padding: 4px 8px;
+                   min-width: 90px; white-space: nowrap; }
 """
-
-_SEARCH_JS = """(query) => {
-  if (!query) return query;
-  const st = window._searchState;
-  if (st && st.query === query && st.matches.length > 0) {
-    st.index = (st.index + 1) % st.matches.length;
-    st.matches[st.index].scrollIntoView({behavior:'smooth', block:'center'});
-  } else {
-    const matches = [];
-    document.querySelectorAll('#code-editor .cm-line').forEach(l => {
-      if (l.textContent.includes(query)) matches.push(l);
-    });
-    window._searchState = {query, index: 0, matches};
-    if (matches.length) matches[0].scrollIntoView({behavior:'smooth', block:'center'});
-  }
-  return query;
-}"""
-
-_SEARCH_NEXT_JS = """(query) => {
-  const st = window._searchState;
-  if (!st || !st.matches.length) return query;
-  st.index = (st.index + 1) % st.matches.length;
-  st.matches[st.index].scrollIntoView({behavior:'smooth', block:'center'});
-  return query;
-}"""
-
-_SEARCH_PREV_JS = """(query) => {
-  const st = window._searchState;
-  if (!st || !st.matches.length) return query;
-  st.index = (st.index - 1 + st.matches.length) % st.matches.length;
-  st.matches[st.index].scrollIntoView({behavior:'smooth', block:'center'});
-  return query;
-}"""
 
 
 def _hint_md(hints_used: int, penalty: int) -> str:
@@ -307,6 +346,77 @@ def _colorise_test_output(raw: str) -> str:
 def _normalize(code: str) -> str:
     """Strip trailing whitespace per line and normalize line endings."""
     return "\n".join(line.rstrip() for line in code.replace("\r\n", "\n").replace("\r", "\n").splitlines())
+
+
+def _workspace_diff_html(cs: "ChallengeState") -> str:
+    """
+    Show a unified diff for every file the student changed, compared to the
+    state they received.
+
+    For files the saboteur touched (cs.sabotaged_files): compare the locally
+    stored received-state snapshot vs the current disk content.
+    For every other modified file: compare git HEAD vs disk.
+
+    This ensures only the student's changes are shown — not the sabotage noise.
+    """
+    import subprocess
+
+    workspace        = cs.workspace.resolve()
+    sabotaged_files  = cs.sabotaged_files   # {rel_posix: received_content}
+    sections: list[str] = []
+
+    # ── 1. Files modified by the saboteur ────────────────────────────────────
+    for rel_posix, received_content in sabotaged_files.items():
+        full_path = workspace / rel_posix
+        if not full_path.exists():
+            continue
+        current = full_path.read_text(encoding="utf-8")
+        if _normalize(current) == _normalize(received_content):
+            continue
+        diff = _diff_html(received_content, current, rel_posix, rel_posix)
+        sections.append(
+            f"<h4 style='color:#94a3b8;margin:10px 0 4px;font-family:monospace;'>"
+            f"📄 {rel_posix}</h4>" + diff
+        )
+
+    # ── 2. Other modified files via git diff ──────────────────────────────────
+    try:
+        proc = subprocess.run(
+            ["git", "diff", "HEAD", "--name-only"],
+            cwd=str(workspace), capture_output=True, text=True,
+            encoding="utf-8", timeout=10,
+        )
+        for changed_rel in proc.stdout.splitlines():
+            changed_posix = changed_rel.replace("\\", "/")
+            if changed_posix in sabotaged_files:
+                continue          # already handled above
+            if not changed_rel.endswith(".py"):
+                continue
+            orig_proc = subprocess.run(
+                ["git", "show", f"HEAD:{changed_rel}"],
+                cwd=str(workspace), capture_output=True, text=True,
+                encoding="utf-8", timeout=10,
+            )
+            if orig_proc.returncode != 0:
+                continue
+            full_path = workspace / changed_rel
+            if not full_path.exists():
+                continue
+            current = full_path.read_text(encoding="utf-8")
+            if _normalize(current) == _normalize(orig_proc.stdout):
+                continue
+            diff = _diff_html(orig_proc.stdout, current, changed_posix, changed_posix)
+            sections.append(
+                f"<h4 style='color:#94a3b8;margin:10px 0 4px;font-family:monospace;'>"
+                f"📄 {changed_posix}</h4>" + diff
+            )
+    except Exception:
+        pass
+
+    if not sections:
+        return "<div style='color:#22c55e;padding:12px;'>No changes detected in workspace.</div>"
+
+    return "".join(sections)
 
 
 def _diff_html(a: str, b: str, from_label: str, to_label: str) -> str:
@@ -356,17 +466,213 @@ def _extract_function_source(code: str, func_name: str) -> str:
     return ""
 
 
-def _expected_fix_diff_html(cs: "ChallengeState") -> str:
-    """Diff only the bug function between sabotaged and original code."""
+def _compute_expected_fixed_code(cs: "ChallengeState") -> str | None:
+    """
+    Compute the expected correct version of the sabotaged file by surgically
+    replacing only the injected bug tokens (using the pre-transform pair).
+
+    Strategy: character-level diff between orig_pre and sabot_pre surfaces the
+    exact changed substrings (e.g. 'plural' vs 'plural[:-1]').  Those same
+    substrings survive obfuscation, so we can find-and-replace them directly
+    in the fully-obfuscated sabotaged_code.
+    Returns None if the replacement cannot be determined.
+    """
+    import difflib
+    import json as _json
+
+    # orig_pre: correct pre-transform function.
+    # Use stored value if available, otherwise extract live from original_code.
+    orig_pre = (
+        cs.original_bug_func_source
+        or _extract_function_source(cs.original_code, cs.bug_func_name)
+    )
+
+    # sabot_pre: sabotaged (buggy) pre-transform function — always from JSON.
+    sabot_pre = ""
+    try:
+        _data = _json.loads((cs.workspace / "challenge_state.json").read_text(encoding="utf-8"))
+        sabot_pre = _data.get("bug_func_source", "")
+    except Exception:
+        pass
+
+    if not (orig_pre and sabot_pre):
+        return None
+
+    # Use snapshot as the base (always matches what the student received on disk).
+    # Fall back to cs.sabotaged_code only if no snapshot entry exists for the target.
+    try:
+        target_rel = cs.target_path.resolve().relative_to(cs.workspace.resolve()).as_posix()
+    except ValueError:
+        target_rel = ""
+    received_code = cs.sabotaged_files.get(target_rel) or cs.sabotaged_code
+
+    # Character-level diff: find exactly what changed between correct and buggy.
+    # We use context-aware replacement: for each changed fragment in sabot_pre,
+    # extend left until we hit a non-identifier char so we get a unique search term
+    # (e.g. 'plural[:-1]' instead of just '[:-1]').
+    matcher = difflib.SequenceMatcher(None, orig_pre, sabot_pre, autojunk=False)
+    opcodes = matcher.get_opcodes()
+
+    fixed = received_code
+    changed = False
+
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "equal":
+            continue
+
+        orig_frag  = orig_pre[i1:i2]   # correct fragment
+        sabot_frag = sabot_pre[j1:j2]  # buggy fragment
+
+        # Skip pure-whitespace/newline differences (formatting noise, not bugs).
+        if not orig_frag.strip() and not sabot_frag.strip():
+            continue
+
+        if tag in ("replace", "insert"):
+            # Build a context-extended search/replace pair so we don't
+            # accidentally match a shorter fragment elsewhere in the file.
+            # Walk left in both strings to the same word boundary.
+            if not sabot_frag.strip():
+                continue
+
+            ctx_start_orig  = i1
+            ctx_start_sabot = j1
+            while ctx_start_orig > 0 and ctx_start_sabot > 0:
+                co = orig_pre[ctx_start_orig - 1]
+                cs_ = sabot_pre[ctx_start_sabot - 1]
+                if co != cs_ or not (co.isalnum() or co == "_"):
+                    break
+                ctx_start_orig  -= 1
+                ctx_start_sabot -= 1
+
+            search_str  = sabot_pre[ctx_start_sabot:j2]   # buggy (with context)
+            replace_str = orig_pre[ctx_start_orig:i2]      # correct (with context)
+
+            if search_str and search_str in fixed:
+                fixed = fixed.replace(search_str, replace_str, 1)
+                changed = True
+            elif sabot_frag and sabot_frag in fixed:
+                fixed = fixed.replace(sabot_frag, orig_frag, 1)
+                changed = True
+
+        elif tag == "delete":
+            # Something exists in orig but was removed in sabot (e.g. +1).
+            # Find the surrounding context in sabot_pre (which matches sabotaged_code)
+            # and reinsert the deleted text.
+            if not orig_frag.strip():
+                continue
+
+            # Take left context from sabot_pre and clip right context at first newline
+            # (comments/indentation differ between pre-transform and obfuscated code).
+            ctx_left  = sabot_pre[max(0, j1 - 30):j1]
+            ctx_right_raw = sabot_pre[j2:j2 + 20]
+            nl = ctx_right_raw.find("\n")
+            ctx_right = ctx_right_raw[:nl] if nl != -1 else ctx_right_raw
+
+            # Trim left context leftward until we find a match in fixed
+            for trim in range(len(ctx_left)):
+                search_str  = ctx_left[trim:] + ctx_right
+                replace_str = ctx_left[trim:] + orig_frag + ctx_right
+                if search_str and search_str in fixed:
+                    fixed = fixed.replace(search_str, replace_str, 1)
+                    changed = True
+                    break
+
+    if changed and fixed != received_code:
+        return fixed
+
+    return None
+
+
+def _expected_fix_diff_html(cs: "ChallengeState", submitted_code: str = "") -> str:
+    """
+    Show two sections:
+    1. What the expected fix looks like (buggy → expected).
+    2. How the student's submission compares to the expected fix
+       (expected → submitted): empty if perfect, otherwise shows extra/wrong changes.
+    """
     func = cs.bug_func_name
-    if func:
-        sabotaged_func = _extract_function_source(cs.sabotaged_code, func)
-        original_func  = _extract_function_source(cs.original_code,  func)
-        if sabotaged_func and original_func:
-            return _diff_html(sabotaged_func, original_func,
-                              f"{func} — buggy", f"{func} — original")
-    return _diff_html(cs.sabotaged_code, cs.original_code,
-                      "buggy (received)", "correct original")
+
+    # Resolve the received (snapshot) content for the target file
+    try:
+        target_rel = cs.target_path.resolve().relative_to(cs.workspace.resolve()).as_posix()
+    except ValueError:
+        target_rel = ""
+    received_code = cs.sabotaged_files.get(target_rel) or cs.sabotaged_code
+
+    expected_fixed = _compute_expected_fixed_code(cs)
+
+    # ── Fallback: function-level or full-file diff ────────────────────────────
+    if expected_fixed is None:
+        if func:
+            sabot_func = _extract_function_source(received_code, func)
+            orig_func  = _extract_function_source(cs.original_code, func)
+            if sabot_func and orig_func:
+                expected_fixed_approx = received_code.replace(sabot_func, orig_func, 1)
+                if expected_fixed_approx != received_code:
+                    expected_fixed = expected_fixed_approx
+        if expected_fixed is None:
+            return _diff_html(received_code, cs.original_code, target_rel, target_rel)
+
+    # ── Section 1: expected fix ───────────────────────────────────────────────
+    section1 = (
+        "<h4 style='color:#94a3b8;margin:8px 0 4px;'>🎯 Expected fix</h4>"
+        + _diff_html(received_code, expected_fixed, target_rel, target_rel)
+    )
+
+    if not submitted_code:
+        return section1
+
+    # ── Section 2: workspace-wide comparison ─────────────────────────────────
+    # "Perfect fix" = target file matches expected AND no other files were changed.
+    def _ast_equivalent(a: str, b: str) -> bool:
+        try:
+            import ast as _ast
+            return _ast.dump(_ast.parse(a)) == _ast.dump(_ast.parse(b))
+        except SyntaxError:
+            return _normalize(a) == _normalize(b)
+
+    target_file_ok = _ast_equivalent(expected_fixed, submitted_code)
+
+    # Check whether the student touched any files outside the sabotaged set.
+    # Known-modified files = snapshot keys + the challenge target file itself.
+    known_changed = set(cs.sabotaged_files.keys()) | ({target_rel} if target_rel else set())
+    import subprocess as _sp
+    try:
+        proc = _sp.run(
+            ["git", "diff", "HEAD", "--name-only"],
+            cwd=str(cs.workspace.resolve()), capture_output=True,
+            text=True, encoding="utf-8", timeout=10,
+        )
+        extra_changed = [
+            f.replace("\\", "/") for f in proc.stdout.splitlines()
+            if f.replace("\\", "/") not in known_changed
+        ]
+    except Exception:
+        extra_changed = []
+
+    is_perfect = target_file_ok and not extra_changed
+
+    if is_perfect:
+        verdict = (
+            "<div style='margin-top:12px;padding:10px 14px;background:#052e16;"
+            "border:1px solid #22c55e;border-radius:6px;color:#22c55e;font-weight:600;'>"
+            "✅ Perfect fix — you changed exactly the right lines and nothing more."
+            "</div>"
+        )
+    else:
+        # Show all changes across the whole workspace so the student can see
+        # both incorrect target-file changes and changes to other files.
+        workspace_diff = _workspace_diff_html(cs)
+        verdict = (
+            "<h4 style='color:#94a3b8;margin:16px 0 4px;'>⚠️ Your changes vs expected fix</h4>"
+            "<p style='color:#f59e0b;font-size:0.85em;margin:0 0 6px;'>"
+            "Your changes differ from the minimal expected fix. "
+            "Red lines were expected but missing or changed; "
+            "green lines are extra changes.</p>"
+            + workspace_diff
+        )
+
+    return section1 + verdict
 
 
 def _hints_html(history: list) -> str:
@@ -515,7 +821,7 @@ def create_full_interface() -> gr.Blocks:
 
             with gr.Row(elem_classes=["header-row"]):
                 header_md  = gr.Markdown("### 🐛 Legacy Code Challenge")
-                timer_html = gr.HTML("", elem_id="challenge-timer")
+                timer_html = gr.HTML('<span id="timer-inner" style="font-family:monospace"></span>', elem_id="challenge-timer")
 
             with gr.Row(elem_classes=["main-row"]):
 
@@ -535,13 +841,6 @@ def create_full_interface() -> gr.Blocks:
                             with gr.Row():
                                 btn_tests   = gr.Button("▶ Run Tests",        variant="secondary")
                                 btn_changes = gr.Button("👁️ View My Changes", variant="secondary")
-                            with gr.Row():
-                                search_box  = gr.Textbox(
-                                    placeholder="Search in file… (Enter = next match)", show_label=False, scale=5,
-                                )
-                                search_prev = gr.Button("◀", variant="secondary", scale=1, min_width=40)
-                                search_btn  = gr.Button("🔍 Find", variant="secondary", scale=1)
-                                search_next = gr.Button("▶", variant="secondary", scale=1, min_width=40)
                             code_editor = gr.Code(
                                 value="",
                                 language="python",
@@ -551,7 +850,7 @@ def create_full_interface() -> gr.Blocks:
                                 elem_id="code-editor",
                             )
                             save_status = gr.Markdown("")
-                            save_btn = gr.Button("💾 Save", variant="secondary")
+                            save_btn = gr.Button("💾 Save", variant="secondary", elem_id="save-btn")
 
                         with gr.Tab("🧪 Test Results", id=2):
                             test_output = gr.HTML(
@@ -702,9 +1001,8 @@ def create_full_interface() -> gr.Blocks:
             if not workspace_path:
                 diff = "<p style='color:#888'>No challenge loaded.</p>"
             else:
-                cs      = ChallengeState(workspace_path)
-                current = cs.read_target()
-                diff    = _diff_html(cs.sabotaged_code, current, "buggy (received)", "your saved code")
+                cs   = ChallengeState(workspace_path)
+                diff = _workspace_diff_html(cs)
             return (gr.update(selected=3), diff)
 
         def on_revert(workspace_path):
@@ -714,7 +1012,7 @@ def create_full_interface() -> gr.Blocks:
             cs.reset_target()
             return cs.sabotaged_code, gr.update(selected=1)
 
-        def on_submit(code, hints_used, submit_count, workspace_path, history):
+        def on_submit(hints_used, submit_count, workspace_path, history):
             _loading = '<p style="text-align:center;padding:40px;color:#888;font-size:1.2em;">⏳ Running tests…</p>'
             yield (
                 gr.update(visible=False),
@@ -728,19 +1026,22 @@ def create_full_interface() -> gr.Blocks:
             try:
                 cs  = ChallengeState(workspace_path)
                 log = SubmissionLog(cs.workspace)
+                # Always read from disk — catches changes made in local IDE (e.g. VS Code)
+                submitted_code = cs.read_target()
                 result = evaluate_submission(
                     workspace_path=workspace_path,
-                    student_code=code,
+                    student_code=submitted_code,
                     original_code=cs.original_code,
                     bug_func_name=cs.bug_func_name,
                     hints_used=hints_used,
+                    sabotaged_code=cs.sabotaged_code,
                 )
-                log.save(code, result, hints_used)
+                log.save(submitted_code, result, hints_used)
                 new_count = submit_count + 1
 
                 score_html    = _score_summary_html(result)
-                your_diff     = _diff_html(cs.sabotaged_code, code, "buggy (received)", "your fix")
-                expected_diff = _expected_fix_diff_html(cs)
+                your_diff     = _workspace_diff_html(cs)
+                expected_diff = _expected_fix_diff_html(cs, submitted_code)
                 test_html     = _colorise_test_output(result["test_output"] or "No test output.")
                 hints_html    = _hints_html(history or [])
 
@@ -781,10 +1082,6 @@ def create_full_interface() -> gr.Blocks:
 
         # ── Wiring ────────────────────────────────────────────────────────
 
-        search_btn.click(fn=None, inputs=[search_box], outputs=[search_box], js=_SEARCH_JS)
-        search_box.submit(fn=None, inputs=[search_box], outputs=[search_box], js=_SEARCH_JS)
-        search_next.click(fn=None, inputs=[search_box], outputs=[search_box], js=_SEARCH_NEXT_JS)
-        search_prev.click(fn=None, inputs=[search_box], outputs=[search_box], js=_SEARCH_PREV_JS)
 
         file_dropdown.change(
             on_file_select,
@@ -803,7 +1100,7 @@ def create_full_interface() -> gr.Blocks:
 
         submit_btn.click(
             on_submit,
-            inputs=[code_editor, hints_used_state, submission_count_state,
+            inputs=[hints_used_state, submission_count_state,
                     workspace_state, chatbot],
             outputs=[
                 challenge_page, results_page,
@@ -852,7 +1149,7 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
                 f"### 🐛 Legacy Code Challenge &nbsp;|&nbsp; Nesting Level {cs.nesting_level}{name_suffix}",
                 elem_classes=["app-header"],
             )
-            gr.HTML("", elem_id="challenge-timer")
+            gr.HTML('<span id="timer-inner"></span>', elem_id="challenge-timer")
 
         # ── Challenge page ────────────────────────────────────────────────
         with gr.Column(visible=True) as challenge_col:
@@ -871,19 +1168,12 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
                             with gr.Row():
                                 btn_tests   = gr.Button("▶ Run Tests",        variant="secondary")
                                 btn_changes = gr.Button("👁️ View My Changes", variant="secondary")
-                            with gr.Row():
-                                search_box  = gr.Textbox(
-                                    placeholder="Search in file… (Enter = next match)", show_label=False, scale=5,
-                                )
-                                search_prev = gr.Button("◀", variant="secondary", scale=1, min_width=40)
-                                search_btn  = gr.Button("🔍 Find", variant="secondary", scale=1)
-                                search_next = gr.Button("▶", variant="secondary", scale=1, min_width=40)
                             code_editor = gr.Code(
                                 value=cs.read_target(), language="python", label=cs.target_file,
                                 interactive=True, lines=30, elem_id="code-editor",
                             )
                             save_status = gr.Markdown("")
-                            save_btn = gr.Button("💾 Save", variant="secondary")
+                            save_btn = gr.Button("💾 Save", variant="secondary", elem_id="save-btn")
 
                         with gr.Tab("🧪 Test Results", id=2):
                             test_output = gr.HTML(
@@ -953,15 +1243,13 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
                 yield (gr.update(selected=2), f"<p style='color:#ef4444;font-family:monospace;'>❌ Error: {exc}</p>")
 
         def on_show_changes():
-            current = cs.read_target()
-            diff    = _diff_html(cs.sabotaged_code, current, "buggy (received)", "your saved code")
-            return (gr.update(selected=3), diff)
+            return (gr.update(selected=3), _workspace_diff_html(cs))
 
         def on_revert():
             cs.reset_target()
             return cs.sabotaged_code, gr.update(selected=1)
 
-        def on_submit(code, hints_used, submit_count, history):
+        def on_submit(hints_used, submit_count, history):
             _loading = '<p style="text-align:center;padding:40px;color:#888;font-size:1.2em;">⏳ Running tests…</p>'
             yield (
                 gr.update(visible=False),
@@ -970,19 +1258,22 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
                 submit_count,
             )
             try:
+                # Always read from disk — catches changes made in local IDE (e.g. VS Code)
+                submitted_code = cs.read_target()
                 result = evaluate_submission(
                     workspace_path=workspace_path,
-                    student_code=code,
+                    student_code=submitted_code,
                     original_code=cs.original_code,
                     bug_func_name=cs.bug_func_name,
                     hints_used=hints_used,
+                    sabotaged_code=cs.sabotaged_code,
                 )
-                log.save(code, result, hints_used)
+                log.save(submitted_code, result, hints_used)
                 new_count = submit_count + 1
 
                 score_html    = _score_summary_html(result)
-                your_diff     = _diff_html(cs.sabotaged_code, code, "buggy (received)", "your fix")
-                expected_diff = _expected_fix_diff_html(cs)
+                your_diff     = _workspace_diff_html(cs)
+                expected_diff = _expected_fix_diff_html(cs, submitted_code)
                 test_html     = _colorise_test_output(result["test_output"] or "No test output.")
                 hints_html    = _hints_html(history or [])
 
@@ -1014,10 +1305,6 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
 
         # ── Wiring ────────────────────────────────────────────────────────
 
-        search_btn.click(fn=None, inputs=[search_box], outputs=[search_box], js=_SEARCH_JS)
-        search_box.submit(fn=None, inputs=[search_box], outputs=[search_box], js=_SEARCH_JS)
-        search_next.click(fn=None, inputs=[search_box], outputs=[search_box], js=_SEARCH_NEXT_JS)
-        search_prev.click(fn=None, inputs=[search_box], outputs=[search_box], js=_SEARCH_PREV_JS)
 
         file_dropdown.change(on_file_select, inputs=[file_dropdown], outputs=[code_editor])
         save_btn.click(on_save, inputs=[code_editor], outputs=[save_status])
@@ -1032,7 +1319,7 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
 
         submit_btn.click(
             on_submit,
-            inputs=[code_editor, hints_used_state, submission_count_state, chatbot],
+            inputs=[hints_used_state, submission_count_state, chatbot],
             outputs=[
                 challenge_col, results_col,
                 score_summary_html,

@@ -20,9 +20,9 @@ HINT_PENALTY = [0, 2, 6, 12, 20, 30]
 
 # ── Test runner ───────────────────────────────────────────────────────────────
 
-def run_tests(workspace_path: str) -> dict:
+def _run_test_file(workspace_path: str, filename: str) -> dict:
     """
-    Execute challenge_run.py and parse its output.
+    Execute a test file (challenge_run.py or challenge_run_secret.py) and parse output.
 
     Returns a dict:
       passed      : int   — number of passing cases
@@ -32,24 +32,25 @@ def run_tests(workspace_path: str) -> dict:
       all_passed  : bool
     """
     workspace = Path(workspace_path)
-    challenge_run = workspace / "challenge_run.py"
+    test_file = workspace / filename
 
-    if not challenge_run.exists():
+    if not test_file.exists():
         return {
             "passed": 0, "total": 0, "score": 0,
-            "output": "Error: challenge_run.py not found in workspace.",
+            "output": f"Error: {filename} not found in workspace.",
             "all_passed": False,
         }
 
     try:
         result = subprocess.run(
-            [sys.executable, str(challenge_run)],
+            [sys.executable, str(test_file)],
             cwd=str(workspace),
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=15,
         )
-        output = result.stdout + (result.stderr or "")
+        output = (result.stdout or "") + (result.stderr or "")
     except subprocess.TimeoutExpired:
         return {
             "passed": 0, "total": 0, "score": 0,
@@ -63,17 +64,17 @@ def run_tests(workspace_path: str) -> dict:
             "all_passed": False,
         }
 
-    # Parse "Case N: PASS / FAIL / CRASH" lines
+    # Parse "Test N: ✓ PASS / ✗ FAIL / ✗ CRASH" lines
     passed = total = 0
     for line in output.split("\n"):
         stripped = line.strip()
-        if ": PASS" in stripped:
+        if "PASS" in stripped and stripped.startswith("Test"):
             passed += 1
             total += 1
-        elif ": FAIL" in stripped or ": CRASH" in stripped:
+        elif ("FAIL" in stripped or "CRASH" in stripped) and stripped.startswith("Test"):
             total += 1
 
-    all_passed = "ALL PASS" in output or "bug is fixed" in output.lower()
+    all_passed = passed > 0 and passed == total
     score = int((passed / total) * 80) if total > 0 else 0
 
     return {
@@ -83,6 +84,16 @@ def run_tests(workspace_path: str) -> dict:
         "output": output.strip(),
         "all_passed": all_passed,
     }
+
+
+def run_tests(workspace_path: str) -> dict:
+    """Run public tests (challenge_run.py) — shown to student during practice."""
+    return _run_test_file(workspace_path, "challenge_run.py")
+
+
+def run_secret_tests(workspace_path: str) -> dict:
+    """Run secret tests (challenge_run_secret.py) — used for final submission scoring."""
+    return _run_test_file(workspace_path, "challenge_run_secret.py")
 
 
 # ── Diff / similarity score ───────────────────────────────────────────────────
@@ -143,35 +154,58 @@ def evaluate_submission(
     original_code: str,
     bug_func_name: str,
     hints_used: int,
+    sabotaged_code: str = "",
 ) -> dict:
     """
     Full evaluation of a student submission.
+    Runs both public (challenge_run.py) and secret (challenge_run_secret.py) tests,
+    combines their results, and returns all score components.
 
     Returns a dict with all score components and diagnostic fields:
-      test_score      : int  (0–80)
-      diff_score      : int  (0–20)
-      hint_penalty    : int  (0–30, subtracted)
-      total_score     : int  (0–100, clamped to 0)
-      passed          : int
-      total_tests     : int
-      all_passed      : bool
-      test_output     : str
-      correct_location: bool  (informational only)
+      test_score        : int  (0-80, combined pass rate)
+      diff_score        : int  (0-20)
+      hint_penalty      : int  (0-30, subtracted)
+      total_score       : int  (0-100, clamped to 0)
+      passed            : int  (combined)
+      total_tests       : int  (combined)
+      all_passed        : bool
+      test_output       : str  (combined output with section headers)
+      public_output     : str  (public test output only)
+      secret_output     : str  (secret test output only)
+      correct_location  : bool  (informational only)
     """
-    test_result = run_tests(workspace_path)
-    diff_score = compute_diff_score(original_code, student_code)
-    penalty = hint_penalty(hints_used)
+    public_result = run_tests(workspace_path)
+    secret_result = run_secret_tests(workspace_path)
+
+    combined_passed = public_result["passed"] + secret_result["passed"]
+    combined_total  = public_result["total"]  + secret_result["total"]
+    combined_score  = int((combined_passed / combined_total) * 80) if combined_total > 0 else 0
+    all_passed      = combined_passed > 0 and combined_passed == combined_total
+
+    combined_output = (
+        "-- Public Tests --\n" + public_result["output"] + "\n\n"
+        "-- Secret Tests --\n" + secret_result["output"]
+    ).strip()
+
+    # Diff score: measures how minimal the fix was (similarity to the sabotaged code
+    # they received). Perfect minimal fix = 20/20. Comparing to original_code is wrong
+    # when obfuscation is applied, since the student's code can never match the clean original.
+    diff_ref   = sabotaged_code if sabotaged_code else original_code
+    diff_score = compute_diff_score(diff_ref, student_code)
+    penalty     = hint_penalty(hints_used)
     correct_loc = check_fix_location(original_code, student_code, bug_func_name)
-    total = max(0, test_result["score"] + diff_score - penalty)
+    total       = max(0, combined_score + diff_score - penalty)
 
     return {
-        "test_score": test_result["score"],
-        "diff_score": diff_score,
-        "hint_penalty": penalty,
-        "total_score": total,
-        "passed": test_result["passed"],
-        "total_tests": test_result["total"],
-        "all_passed": test_result["all_passed"],
-        "test_output": test_result["output"],
+        "test_score":       combined_score,
+        "diff_score":       diff_score,
+        "hint_penalty":     penalty,
+        "total_score":      total,
+        "passed":           combined_passed,
+        "total_tests":      combined_total,
+        "all_passed":       all_passed,
+        "test_output":      combined_output,
+        "public_output":    public_result["output"],
+        "secret_output":    secret_result["output"],
         "correct_location": correct_loc,
     }
