@@ -1477,6 +1477,7 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
 
             # Verify public tests (simpler, for development)
             verified_public: list[dict] = []
+            public_failing_count = 0
             for tc in raw_public_cases:
                 args = tc.get("args", "()")
                 if "lambda" in args or "range(" in args or "<function" in args:
@@ -1485,7 +1486,7 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
                     eval(args, {"__builtins__": {}})
                 except:
                     continue
-                
+
                 orig_ok, true_exp = _try_exec(source, surface_func_name, args, file_path=current_file)
                 if not orig_ok:
                     continue
@@ -1493,12 +1494,14 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
                     eval(true_exp, {"__builtins__": __builtins__})
                 except:
                     continue
-                
+
                 sabot_ok, true_act = _try_exec(current_source, surface_func_name, args, file_path=current_file)
                 if not sabot_ok:
                     continue
-                
+
                 verified_public.append({"args": args, "expected": true_exp})
+                if true_exp != true_act:
+                    public_failing_count += 1
             
             # Verify secret tests (harder, for final validation)  
             verified_secret: list[dict] = []
@@ -1555,6 +1558,12 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
                     print("[sabotage_init] No test case exposes the bug after exec -- retrying outer loop")
                 continue
 
+            if public_failing_count < 2:
+                if debug_mode:
+                    print(f"[sabotage_init] Only {public_failing_count}/5 public tests fail on sabotaged code "
+                          f"(need >= 2) -- retrying outer loop")
+                continue
+
             if debug_mode:
                 print(f"[sabotage_init] Verified {len(verified_public)} public tests and {len(verified_secret)} secret tests; "
                       f"first failing: {first_fail_args} -> expected={first_expected}, got={first_actual}")
@@ -1578,8 +1587,9 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
             state["public_tests"]    = public_tests     # First 5 (for students to see)
             state["secret_tests"]    = secret_tests     # Last 5 (hidden until final submission)
             state["bug_description"] = " | ".join(all_descriptions)
-            state["bug_func_name"]   = all_data[0]["_debug_func_name"]  if all_data else ""
-            state["bug_func_source"] = all_data[0]["_debug_sabot_func"] if all_data else ""
+            state["bug_func_name"]          = all_data[0]["_debug_func_name"]   if all_data else ""
+            state["bug_func_source"]        = all_data[0]["_debug_sabot_func"]  if all_data else ""
+            state["original_bug_func_source"] = all_data[0]["_debug_func_source"] if all_data else ""
             
             # Store the call chain for debugging and documentation
             # Format: {bug_function_name: [surface_func, ..., bug_func]}

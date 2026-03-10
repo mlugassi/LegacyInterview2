@@ -1,4 +1,5 @@
 import os
+import stat
 
 from architect.state import ArchitectState
 
@@ -57,6 +58,9 @@ def deploy_challenge(state: ArchitectState) -> ArchitectState:
         return (
             "import sys\n"
             "import os\n\n"
+            "# Ensure UTF-8 output on Windows (avoids UnicodeEncodeError with ✓/✗ chars)\n"
+            "if hasattr(sys.stdout, 'reconfigure'):\n"
+            "    sys.stdout.reconfigure(encoding='utf-8')\n\n"
             "# Make the repo root importable\n"
             "sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\n\n"
             f"from {module_path} import {func}\n\n"
@@ -114,5 +118,31 @@ def deploy_challenge(state: ArchitectState) -> ArchitectState:
     with open(detailed_path, "w", encoding="utf-8") as f:
         f.write(state.get("detailed_explanation", "No detailed explanation available."))
     print(f"[deployer] Written: {detailed_path}")
-    
+
+    # Write snapshot of every file modified by the saboteur to .challenge_snapshot/
+    # This lets the student interface compute exact diffs against what was received,
+    # even if the JSON is later regenerated or becomes stale.
+    snapshot_dir = os.path.join(clone_path, ".challenge_snapshot")
+    os.makedirs(snapshot_dir, exist_ok=True)
+
+    target_file = state.get("target_file", "")
+    sabotaged_code = state.get("sabotaged_code", "")
+    if target_file and sabotaged_code:
+        rel = os.path.relpath(target_file, clone_path)           # e.g. boltons/strutils.py
+        snap_path = os.path.join(snapshot_dir, rel.replace(os.sep, "__"))
+        # Remove read-only flag first in case we're overwriting a previous run
+        if os.path.exists(snap_path):
+            os.chmod(snap_path, stat.S_IWRITE)
+        with open(snap_path, "w", encoding="utf-8") as f:
+            f.write(sabotaged_code)
+        # Mark read-only so the student can't accidentally overwrite it
+        os.chmod(snap_path, stat.S_IREAD | stat.S_IRGRP | stat.S_IROTH)
+        # Hide the directory on Windows
+        try:
+            import subprocess as _sp
+            _sp.run(["attrib", "+H", snapshot_dir], check=False, capture_output=True)
+        except Exception:
+            pass
+        print(f"[deployer] Snapshot: {snap_path}")
+
     return state

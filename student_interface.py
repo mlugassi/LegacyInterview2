@@ -93,7 +93,10 @@ class ChallengeState:
 
     def list_py_files(self) -> list[str]:
         files = sorted(self.workspace.rglob("*.py"))
-        return [f.relative_to(self.workspace).as_posix() for f in files]
+        return [
+            f.relative_to(self.workspace).as_posix() for f in files
+            if ".challenge_snapshot" not in f.parts
+        ]
 
     def read_py_file(self, rel_path: str) -> str:
         full = self.workspace / rel_path
@@ -130,16 +133,16 @@ class SubmissionLog:
     def save(self, student_code: str, result: dict, hints_used: int) -> None:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         entry = {
-            "timestamp":    ts,
-            "hints_used":   hints_used,
-            "test_score":   result["test_score"],
-            "diff_score":   result["diff_score"],
-            "hint_penalty": result["hint_penalty"],
-            "total_score":  result["total_score"],
-            "passed":       result["passed"],
-            "total_tests":  result["total_tests"],
-            "all_passed":   result["all_passed"],
-            "student_code": student_code,
+            "timestamp":       ts,
+            "hints_used":      hints_used,
+            "llm_score":       result.get("llm_score", result.get("total_score", 0)),
+            "llm_explanation": result.get("llm_explanation", ""),
+            "hint_penalty":    result["hint_penalty"],
+            "total_score":     result["total_score"],
+            "passed":          result["passed"],
+            "total_tests":     result["total_tests"],
+            "all_passed":      result["all_passed"],
+            "student_code":    student_code,
         }
         path = self.log_dir / f"{ts}.json"
         with open(path, "w", encoding="utf-8") as f:
@@ -506,6 +509,13 @@ def _compute_expected_fixed_code(cs: "ChallengeState") -> str | None:
         target_rel = ""
     received_code = cs.sabotaged_files.get(target_rel) or cs.sabotaged_code
 
+    # Extract the sabotaged function's exact text from received_code.
+    # All replacements are scoped to this substring so we never accidentally
+    # patch code outside the target function.
+    func_in_received = _extract_function_source(received_code, cs.bug_func_name)
+    if not func_in_received:
+        return None  # can't locate function in the file — give up
+
     # Character-level diff: find exactly what changed between correct and buggy.
     # We use context-aware replacement: for each changed fragment in sabot_pre,
     # extend left until we hit a non-identifier char so we get a unique search term
@@ -513,7 +523,8 @@ def _compute_expected_fixed_code(cs: "ChallengeState") -> str | None:
     matcher = difflib.SequenceMatcher(None, orig_pre, sabot_pre, autojunk=False)
     opcodes = matcher.get_opcodes()
 
-    fixed = received_code
+    # Work on just the function text, not the whole file.
+    fixed_func = func_in_received
     changed = False
 
     for tag, i1, i2, j1, j2 in opcodes:
@@ -529,7 +540,7 @@ def _compute_expected_fixed_code(cs: "ChallengeState") -> str | None:
 
         if tag in ("replace", "insert"):
             # Build a context-extended search/replace pair so we don't
-            # accidentally match a shorter fragment elsewhere in the file.
+            # accidentally match a shorter fragment elsewhere in the function.
             # Walk left in both strings to the same word boundary.
             if not sabot_frag.strip():
                 continue
@@ -547,17 +558,16 @@ def _compute_expected_fixed_code(cs: "ChallengeState") -> str | None:
             search_str  = sabot_pre[ctx_start_sabot:j2]   # buggy (with context)
             replace_str = orig_pre[ctx_start_orig:i2]      # correct (with context)
 
-            if search_str and search_str in fixed:
-                fixed = fixed.replace(search_str, replace_str, 1)
+            if search_str and search_str in fixed_func:
+                fixed_func = fixed_func.replace(search_str, replace_str, 1)
                 changed = True
-            elif sabot_frag and sabot_frag in fixed:
-                fixed = fixed.replace(sabot_frag, orig_frag, 1)
+            elif sabot_frag and sabot_frag in fixed_func:
+                fixed_func = fixed_func.replace(sabot_frag, orig_frag, 1)
                 changed = True
 
         elif tag == "delete":
             # Something exists in orig but was removed in sabot (e.g. +1).
-            # Find the surrounding context in sabot_pre (which matches sabotaged_code)
-            # and reinsert the deleted text.
+            # Find the surrounding context in sabot_pre and reinsert the deleted text.
             if not orig_frag.strip():
                 continue
 
@@ -568,16 +578,21 @@ def _compute_expected_fixed_code(cs: "ChallengeState") -> str | None:
             nl = ctx_right_raw.find("\n")
             ctx_right = ctx_right_raw[:nl] if nl != -1 else ctx_right_raw
 
-            # Trim left context leftward until we find a match in fixed
+            # Trim left context leftward until we find a match in fixed_func
             for trim in range(len(ctx_left)):
                 search_str  = ctx_left[trim:] + ctx_right
                 replace_str = ctx_left[trim:] + orig_frag + ctx_right
-                if search_str and search_str in fixed:
-                    fixed = fixed.replace(search_str, replace_str, 1)
+                if search_str and search_str in fixed_func:
+                    fixed_func = fixed_func.replace(search_str, replace_str, 1)
                     changed = True
                     break
 
-    if changed and fixed != received_code:
+    if not changed or fixed_func == func_in_received:
+        return None
+
+    # Splice the patched function back into the full file.
+    fixed = received_code.replace(func_in_received, fixed_func, 1)
+    if fixed != received_code:
         return fixed
 
     return None
@@ -688,6 +703,11 @@ def _hints_html(history: list) -> str:
         else:
             role, content = ("user", entry[0]) if entry[0] else ("assistant", entry[1])
 
+        # Gradio multimodal messages can have content as a list of parts
+        if isinstance(content, list):
+            content = " ".join(str(p) for p in content if p)
+        content = str(content) if content is not None else ""
+
         escaped = content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         if role == "user":
             parts.append(
@@ -711,16 +731,27 @@ def _hints_html(history: list) -> str:
 
 def _score_summary_html(result: dict) -> str:
     """Build a prominent score summary block."""
-    total   = result["total_score"]
-    tests   = result["test_score"]
-    diff    = result["diff_score"]
-    penalty = result["hint_penalty"]
-    passed  = result["passed"]
-    ttl     = result["total_tests"]
-    all_ok  = result["all_passed"]
+    total       = result["total_score"]
+    llm_score   = result.get("llm_score", total)
+    explanation = result.get("llm_explanation", "")
+    penalty     = result["hint_penalty"]
+    passed      = result["passed"]
+    ttl         = result["total_tests"]
+    all_ok      = result["all_passed"]
 
-    color   = "#22c55e" if all_ok else ("#f59e0b" if total >= 50 else "#ef4444")
-    badge   = "🎉 ALL TESTS PASS!" if all_ok else ("⚠️ Partial" if total > 0 else "❌ Failed")
+    color = "#22c55e" if all_ok else ("#f59e0b" if total >= 50 else "#ef4444")
+    badge = "🎉 ALL TESTS PASS!" if all_ok else ("⚠️ Partial" if total > 0 else "❌ Failed")
+
+    explanation_html = ""
+    if explanation:
+        import html as _html
+        escaped = _html.escape(explanation)
+        explanation_html = (
+            f'<div style="margin-top:14px;padding:10px 14px;background:#0f172a;'
+            f'border-left:3px solid #60a5fa;border-radius:4px;color:#cbd5e1;'
+            f'font-size:0.9em;line-height:1.5;">'
+            f'<strong style="color:#60a5fa;">🤖 AI Evaluation:</strong><br>{escaped}</div>'
+        )
 
     return f"""
 <div style="padding:20px;border-radius:12px;background:#1e1e1e;border:2px solid {color};">
@@ -728,14 +759,9 @@ def _score_summary_html(result: dict) -> str:
   <div style="text-align:center;color:{color};font-size:1.1em;margin-bottom:16px;">{badge}</div>
   <table style="width:100%;border-collapse:collapse;font-family:monospace;">
     <tr>
-      <td style="padding:6px 12px;color:#d4d4d4;">🧪 Test Score</td>
-      <td style="padding:6px 12px;color:#22c55e;text-align:right;font-weight:bold;">{tests}/80</td>
-      <td style="padding:6px 12px;color:#888;">({passed}/{ttl} cases passed)</td>
-    </tr>
-    <tr>
-      <td style="padding:6px 12px;color:#d4d4d4;">📐 Diff Score</td>
-      <td style="padding:6px 12px;color:#60a5fa;text-align:right;font-weight:bold;">{diff}/20</td>
-      <td style="padding:6px 12px;color:#888;">(similarity to original)</td>
+      <td style="padding:6px 12px;color:#d4d4d4;">🤖 AI Score</td>
+      <td style="padding:6px 12px;color:#60a5fa;text-align:right;font-weight:bold;">{llm_score}/100</td>
+      <td style="padding:6px 12px;color:#888;">({passed}/{ttl} tests passed)</td>
     </tr>
     <tr>
       <td style="padding:6px 12px;color:#d4d4d4;">💡 Hint Penalty</td>
@@ -743,6 +769,7 @@ def _score_summary_html(result: dict) -> str:
       <td style="padding:6px 12px;color:#888;"></td>
     </tr>
   </table>
+  {explanation_html}
 </div>
 """
 
@@ -1035,6 +1062,7 @@ def create_full_interface() -> gr.Blocks:
                     bug_func_name=cs.bug_func_name,
                     hints_used=hints_used,
                     sabotaged_code=cs.sabotaged_code,
+                    target_file=str(cs.target_path),
                 )
                 log.save(submitted_code, result, hints_used)
                 new_count = submit_count + 1
@@ -1267,6 +1295,7 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
                     bug_func_name=cs.bug_func_name,
                     hints_used=hints_used,
                     sabotaged_code=cs.sabotaged_code,
+                    target_file=str(cs.target_path),
                 )
                 log.save(submitted_code, result, hints_used)
                 new_count = submit_count + 1
