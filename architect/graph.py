@@ -10,6 +10,7 @@ from architect.nodes import (
     node_obfuscation_level_1,
     node_obfuscation_level_2,
     node_verify_sabotage,
+    node_add_misleading_comments,
     node_overwrite_file,
     node_deploy,
     node_done,
@@ -40,6 +41,7 @@ def build_graph() -> StateGraph:
 
     # Phase 4: Verification & Deployment
     builder.add_node("verify_sabotage",     RunnableLambda(node_verify_sabotage))
+    builder.add_node("add_misleading_comments", RunnableLambda(node_add_misleading_comments))
     builder.add_node("overwrite_file",      RunnableLambda(node_overwrite_file))
     builder.add_node("deploy",              RunnableLambda(node_deploy))
     builder.add_node("done",                RunnableLambda(node_done))
@@ -64,7 +66,8 @@ def build_graph() -> StateGraph:
     builder.add_edge("obfuscation_level_1", "obfuscation_level_2")
     builder.add_edge("obfuscation_level_2", "verify_sabotage")
 
-    builder.add_edge("verify_sabotage",     "overwrite_file")
+    builder.add_edge("verify_sabotage",     "add_misleading_comments")
+    builder.add_edge("add_misleading_comments", "overwrite_file")
     builder.add_edge("overwrite_file",      "deploy")
     builder.add_edge("deploy",              "done")
     builder.add_edge("done",                END)

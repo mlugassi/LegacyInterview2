@@ -101,18 +101,27 @@ CRITICAL TEST CASE REQUIREMENTS:
 PUBLIC TESTS (test_cases_public) - 5 SIMPLER TESTS FOR DEVELOPMENT:
 - These help the student understand the basic problem
 - Cover normal/common use cases
-- 2-3 should PASS (function works for simple inputs)
+- 2-3 should PASS (function works for simple inputs where bug doesn't trigger)
 - 2-3 should FAIL (exposing the bug in obvious cases)
 - Examples: typical inputs, small numbers, simple strings
 - Goal: Guide the student toward understanding what's broken
+- IMPORTANT: At least 2 tests MUST expose the injected bug!
 
 SECRET TESTS (test_cases_secret) - 5 HARDER TESTS FOR FINAL VALIDATION:
 - These tests MUST be significantly harder and more precise
-- ALL 5 should expose the bug in subtle/edge-case scenarios
-- Focus on boundary conditions, edge cases, corner cases
+- At least 3-4 should expose the bug in subtle/edge-case scenarios
+- Focus on boundary conditions, edge cases, corner cases where the bug manifests
 - Examples: empty inputs, None, zero, negative numbers, very large values, special characters
 - These tests should FAIL even if the student makes a partial/incomplete fix
 - Goal: Ensure the fix is complete and handles all edge cases correctly
+- CRITICAL: Design these tests specifically to trigger the bug you injected!
+
+TEST COVERAGE REQUIREMENT:
+- Your tests MUST actually detect the bug you injected
+- At least 30-40% of all tests (public + secret combined) should FAIL on the sabotaged code
+- If your bug is "off-by-one in loop", create tests with edge cases that expose it
+- If your bug is "wrong operator", create tests where that operator matters
+- Don't create generic tests that happen to pass despite the bug!
 
 IMPORTANT: If all 5 public tests pass, it should NOT guarantee that all 5 secret tests pass!
 The secret tests must catch incomplete fixes that work for simple cases but fail on edges.
@@ -122,8 +131,9 @@ Critical rules:
 - The `def` line MUST keep the EXACT SAME function name as the original. Do NOT rename the function.
 - Preserve the EXACT original indentation level of the function (copy it from the input).
 - Do NOT modify any docstrings or string literals that already exist in the function.
-- Follow ONLY the steps listed in the SABOTAGE INSTRUCTIONS — do not add renaming or comments
-  unless the instructions explicitly ask for them.
+- CRITICAL: Do NOT add ANY comments to the code! No # comments, no explanatory notes, nothing!
+  Follow ONLY the steps listed in the SABOTAGE INSTRUCTIONS — do not add renaming or comments
+  unless the instructions explicitly ask for them (they never will).
 - The bug MUST produce a WRONG RETURN VALUE — NOT a crash or exception.
   The sabotaged function must still run without raising exceptions; it just returns the wrong result.
   If your bug causes a TypeError, AttributeError, or any other exception, it will be REJECTED.
@@ -1277,8 +1287,11 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
     candidate_files: list[str] = list(state.get("candidate_files") or [state["target_file"]])
     tried_files: set[str] = set()
 
-    max_outer_attempts = 3
-    while candidate_files:
+    max_outer_attempts = 5  # Increased from 3 to give more chances
+    total_attempts = 0
+    max_total_attempts = 15  # Safety limit to prevent infinite loops
+    
+    while candidate_files and total_attempts < max_total_attempts:
         current_file = candidate_files.pop(0)
         if current_file in tried_files:
             continue
@@ -1293,6 +1306,12 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
         tried_surfaces: set[str] = set()
 
         for outer in range(1, max_outer_attempts + 1):
+            total_attempts += 1
+            if total_attempts > max_total_attempts:
+                if debug_mode:
+                    print(f"[sabotage_init] Reached maximum total attempts ({max_total_attempts}) -- giving up")
+                break
+                
             try:
                 surface_func_name, module_func_nodes = _pick_surface_function(
                     source, max_depth, exclude=tried_surfaces
@@ -1303,23 +1322,32 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
             tried_surfaces.add(surface_func_name)
             call_graph = _build_call_graph(module_func_nodes)
 
+            # Find reachable functions (those in the call graph)
             reachable = _find_reachable(call_graph, surface_func_name, max_depth)
-            substantial = {
-                h: d for h, d in reachable.items()
-                if module_func_nodes.get(h)
-                and module_func_nodes[h].end_lineno - module_func_nodes[h].lineno >= 5
+            
+            # Important: Include ALL functions that are large enough, not just reachable ones
+            # Because we can use _augment_chain_depth to add wrapper functions later!
+            # This allows us to inject bugs into ANY function and then build the required nesting
+            all_candidates = {
+                h: reachable.get(h, 0)  # Use existing depth if reachable, otherwise 0 (direct call)
+                for h, node in module_func_nodes.items()
+                if h != surface_func_name  # Don't include the surface function itself
+                and node.end_lineno - node.lineno >= 3  # Minimum 3 lines
             }
+            
+            # substantial now includes ALL functions, even direct ones (depth 0)
+            substantial = all_candidates
 
             indirect_mode = bool(substantial)
             if substantial:
-                max_avail = max(substantial.values())
+                max_avail = max(substantial.values()) if substantial.values() else 0
                 
                 # NEW DYNAMIC DEPTH STRATEGY:
-                # Instead of always picking the deepest functions, we'll pick from various depths
-                # and augment shorter chains to reach the target depth.
-                # This creates variety even when the same file/function is picked multiple times.
+                # We pick functions from ANY depth (including 0 = direct call)
+                # and use _augment_chain_depth to build the required nesting level.
+                # This maximizes the number of available functions for bug injection!
                 
-                # Collect candidates from all depths (not just max_avail)
+                # Collect candidates from all depths (including depth 0)
                 depth_pools = {}
                 for h, d in substantial.items():
                     if d not in depth_pools:
@@ -1327,13 +1355,21 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
                     depth_pools[d].append(h)
                 
                 # Weighted selection: prefer deeper chains but allow shallower ones too
-                # 60% chance for deep chains (>= max_depth-1), 40% for shallower
+                # 60% chance for deep chains (>= max_depth-1), 40% for shallower (including depth 0)
                 use_deep = random.random() < 0.6
+                
+                if debug_mode:
+                    print(f"[sabotage_init] Number of substantial functions available: {len(substantial)}")
+                    print(f"[sabotage_init] Depth distribution: {dict((d, len(funcs)) for d, funcs in depth_pools.items())}")
+                    print(f"[sabotage_init] Requested bugs: {n_bugs}, Selection mode: {'deep' if use_deep else 'shallow'}")
                 
                 bug_targets = []
                 if use_deep and max_avail >= max_depth - 1:
-                    # Prefer deep chains
+                    # Prefer deep chains - collect from multiple depths if needed
                     for target_depth in range(max_avail, max(1, max_depth - 2), -1):
+                        if len(bug_targets) >= n_bugs:
+                            break  # We have enough bugs
+                        
                         if target_depth in depth_pools:
                             pool = depth_pools[target_depth]
                             verified_pool = []
@@ -1343,31 +1379,94 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
                                     verified_pool.append((candidate, test_path))
                             
                             if verified_pool:
-                                selected = random.sample(verified_pool, min(n_bugs, len(verified_pool)))
-                                bug_targets = [(cand, path) for cand, path in selected]
-                                break
+                                # Take as many as we still need
+                                needed = n_bugs - len(bug_targets)
+                                selected = random.sample(verified_pool, min(needed, len(verified_pool)))
+                                bug_targets.extend([(cand, path) for cand, path in selected])
                 else:
-                    # Pick from shallower depths and augment them
+                    # Pick from shallower depths and augment them - collect from multiple depths
+                    # Now includes depth 0 (direct functions) since we can augment any function!
                     candidate_depths = sorted(depth_pools.keys())
                     for target_depth in candidate_depths:
-                        if target_depth < max_depth - 1:  # Only pick shallow ones for augmentation
-                            pool = depth_pools[target_depth]
-                            if pool:
-                                selected_funcs = random.sample(pool, min(n_bugs, len(pool)))
-                                bug_targets = []
-                                for func in selected_funcs:
+                        if len(bug_targets) >= n_bugs:
+                            break  # We have enough bugs
+                        
+                        # Accept ALL depths (including 0) - augmentation will handle creating the nesting
+                        pool = depth_pools[target_depth]
+                        if pool:
+                            needed = n_bugs - len(bug_targets)
+                            selected_funcs = random.sample(pool, min(needed, len(pool)))
+                            for func in selected_funcs:
+                                # Try to find an existing path, or create a direct one
+                                try:
                                     path = _find_call_path(call_graph, surface_func_name, func, max_depth)
-                                    bug_targets.append((func, path))
-                                break
+                                except:
+                                    # If no path found, create a direct path (depth 0)
+                                    path = [surface_func_name, func]
+                                bug_targets.append((func, path))
+                            # Continue to next depth if we still need more
                 
                 # If no targets selected, fall back to any substantial function
                 if not bug_targets:
                     pool = list(substantial.keys())
                     selected_funcs = random.sample(pool, min(n_bugs, len(pool)))
+                    if debug_mode:
+                        print(f"[sabotage_init] Fallback: selecting {len(selected_funcs)} bugs from {len(pool)} substantial functions")
                     bug_targets = []
                     for func in selected_funcs:
-                        path = _find_call_path(call_graph, surface_func_name, func, max_depth)
+                        try:
+                            path = _find_call_path(call_graph, surface_func_name, func, max_depth)
+                        except:
+                            # If no path exists, create a direct path - augmentation will add the nesting
+                            path = [surface_func_name, func]
                         bug_targets.append((func, path))
+                
+                # If we still don't have enough bugs, try to get more from any available depth
+                if len(bug_targets) < n_bugs and len(bug_targets) > 0:
+                    if debug_mode:
+                        print(f"[sabotage_init] Only found {len(bug_targets)}/{n_bugs} bugs, trying to add more from other depths...")
+                    
+                    # Get all functions not already selected
+                    already_selected = {func for func, _ in bug_targets}
+                    remaining_pool = [f for f in substantial.keys() if f not in already_selected]
+                    
+                    if remaining_pool:
+                        needed = n_bugs - len(bug_targets)
+                        additional = random.sample(remaining_pool, min(needed, len(remaining_pool)))
+                        for func in additional:
+                            try:
+                                path = _find_call_path(call_graph, surface_func_name, func, max_depth)
+                            except:
+                                # If no path exists, create a direct path
+                                path = [surface_func_name, func]
+                            bug_targets.append((func, path))
+                        
+                        if debug_mode:
+                            print(f"[sabotage_init] Added {len(additional)} more bugs from remaining pool, total now: {len(bug_targets)}")
+                
+                # CRITICAL: If still not enough bugs, inject multiple bugs in the same functions
+                # This is actually MORE challenging for students!
+                if len(bug_targets) < n_bugs and len(bug_targets) > 0:
+                    needed = n_bugs - len(bug_targets)
+                    if debug_mode:
+                        print(f"[sabotage_init] Still need {needed} more bug(s). Will inject multiple bugs into existing functions.")
+                    
+                    # Duplicate existing targets to reach the required number
+                    # Prefer functions with higher depth (more interesting)
+                    sorted_targets = sorted(bug_targets, key=lambda x: len(x[1]), reverse=True)
+                    for i in range(needed):
+                        # Cycle through targets to distribute bugs evenly
+                        target_to_duplicate = sorted_targets[i % len(sorted_targets)]
+                        bug_targets.append(target_to_duplicate)
+                        if debug_mode:
+                            func_name = target_to_duplicate[0]
+                            print(f"[sabotage_init] Adding additional bug to function '{func_name}'")
+                
+                if debug_mode:
+                    print(f"[sabotage_init] FINAL: Selected {len(bug_targets)} bug injection(s) (requested {n_bugs})")
+                    unique_funcs = len(set(func for func, _ in bug_targets))
+                    if unique_funcs < len(bug_targets):
+                        print(f"[sabotage_init] Note: {len(bug_targets)} bugs distributed across {unique_funcs} functions (multiple bugs per function)")
                 
                 # Now augment chains that are too short
                 augmented_targets = []
@@ -1413,6 +1512,7 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
             if debug_mode:
                 print(f"[sabotage_init] Outer attempt {outer}: surface='{surface_func_name}', "
                       f"bug_targets={bug_targets}, max_depth={max_depth}, indirect={indirect_mode}")
+                print(f"[sabotage_init] Number of bugs requested: {n_bugs}, Number of targets selected: {len(bug_targets)}")
                 for t, chain in bug_chains.items():
                     print(f"[sabotage_init]   chain to '{t}': {' -> '.join(chain)} (depth {len(chain)-1})")
 
@@ -1432,7 +1532,9 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
             all_descriptions: list[str] = []
             all_data: list[dict] = []
             last_data: dict | None = None
-            failed = False
+
+            if debug_mode:
+                print(f"[sabotage_init] Starting bug injection for {len(bug_targets_sorted)} bugs")
 
             for bug_func_name in bug_targets_sorted:
                 new_source, data = _sabotage_one_helper(
@@ -1446,34 +1548,51 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
                 )
                 if new_source is None:
                     if debug_mode:
-                        print(f"[sabotage_init] Failed to sabotage '{bug_func_name}' -- retrying outer loop")
-                    failed = True
-                    break
+                        print(f"[sabotage_init] Failed to sabotage '{bug_func_name}' -- skipping this bug and continuing")
+                    continue  # Skip this bug, try next one
+                
                 current_source = new_source
                 all_descriptions.append(data["bug_description"])
                 all_data.append(data)
                 last_data = data
+                if debug_mode:
+                    print(f"[sabotage_init] Successfully injected bug #{len(all_data)} into '{bug_func_name}'")
                 if desc := data.get("bug_description", ""):
                     all_previous_bugs.append(desc)
 
-            if failed or last_data is None:
+            # Check if we successfully injected at least one bug
+            if not all_data or last_data is None:
+                if debug_mode:
+                    print(f"[sabotage_init] All {len(bug_targets_sorted)} bug injections failed -- retrying outer loop")
                 continue
 
-            # Get public and secret test cases from AI response
-            raw_public_cases = last_data.get("test_cases_public", [])
-            raw_secret_cases = last_data.get("test_cases_secret", [])
+            # MERGE test cases from ALL bugs (not just last one!)
+            # This ensures every bug is covered by its own tests
+            raw_public_cases = []
+            raw_secret_cases = []
             
-            # Fallback: if old format, split the test_cases
-            if not raw_public_cases and not raw_secret_cases:
-                raw_all = last_data.get("test_cases", [])
-                mid = len(raw_all) // 2
-                raw_public_cases = raw_all[:mid] if mid > 0 else raw_all
-                raw_secret_cases = raw_all[mid:] if mid > 0 else []
+            for bug_data in all_data:
+                # Get test cases from this bug
+                bug_public = bug_data.get("test_cases_public", [])
+                bug_secret = bug_data.get("test_cases_secret", [])
+                
+                # Fallback: if old format, split the test_cases
+                if not bug_public and not bug_secret:
+                    raw_all = bug_data.get("test_cases", [])
+                    mid = len(raw_all) // 2
+                    bug_public = raw_all[:mid] if mid > 0 else raw_all
+                    bug_secret = raw_all[mid:] if mid > 0 else []
+                
+                raw_public_cases.extend(bug_public)
+                raw_secret_cases.extend(bug_secret)
             
             if not raw_public_cases and not raw_secret_cases:
                 if debug_mode:
-                    print("[sabotage_init] GPT returned no test cases -- retrying outer loop")
+                    print("[sabotage_init] GPT returned no test cases from any bug -- retrying outer loop")
                 continue
+            
+            if debug_mode:
+                print(f"[sabotage_init] Collected {len(raw_public_cases)} public + {len(raw_secret_cases)} secret test cases from {len(all_data)} bug(s)")
 
             # Verify public tests (simpler, for development)
             verified_public: list[dict] = []
@@ -1505,6 +1624,7 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
             
             # Verify secret tests (harder, for final validation)  
             verified_secret: list[dict] = []
+            secret_failing_count = 0
             first_fail_args = first_expected = first_actual = None
             exec_possible = False
             
@@ -1532,8 +1652,10 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
                 exec_possible = True
                 verified_secret.append({"args": args, "expected": true_exp})
                 
-                if first_fail_args is None and true_exp != true_act:
-                    first_fail_args, first_expected, first_actual = args, true_exp, true_act
+                if true_exp != true_act:
+                    secret_failing_count += 1
+                    if first_fail_args is None:
+                        first_fail_args, first_expected, first_actual = args, true_exp, true_act
             
             # Also check public tests for failures
             if first_fail_args is None:
@@ -1560,13 +1682,33 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
 
             if public_failing_count < 2:
                 if debug_mode:
-                    print(f"[sabotage_init] Only {public_failing_count}/5 public tests fail on sabotaged code "
+                    print(f"[sabotage_init] Only {public_failing_count} public tests fail on sabotaged code "
                           f"(need >= 2) -- retrying outer loop")
                 continue
 
+            # Ensure enough secret tests fail (at least 2 out of the secret tests)
+            if secret_failing_count < 2:
+                if debug_mode:
+                    print(f"[sabotage_init] Only {secret_failing_count} secret tests fail on sabotaged code "
+                          f"(need >= 2) -- retrying outer loop")
+                continue
+
+            # Ensure overall failure rate is significant (at least 30% of all tests should fail)
+            total_failing = public_failing_count + secret_failing_count
+            total_tests = len(verified_public) + len(verified_secret)
+            failure_rate = total_failing / total_tests if total_tests > 0 else 0
+            
+            if failure_rate < 0.30:
+                if debug_mode:
+                    print(f"[sabotage_init] Only {total_failing}/{total_tests} tests fail ({failure_rate:.1%}) "
+                          f"(need >= 30%) -- retrying outer loop")
+                continue
+
             if debug_mode:
-                print(f"[sabotage_init] Verified {len(verified_public)} public tests and {len(verified_secret)} secret tests; "
-                      f"first failing: {first_fail_args} -> expected={first_expected}, got={first_actual}")
+                print(f"[sabotage_init] Verified {len(verified_public)} public tests ({public_failing_count} fail) and "
+                      f"{len(verified_secret)} secret tests ({secret_failing_count} fail); "
+                      f"overall failure rate: {failure_rate:.1%}")
+                print(f"[sabotage_init] First failing: {first_fail_args} -> expected={first_expected}, got={first_actual}")
 
             # Use the public/secret split from AI generation
             public_tests = verified_public
@@ -1590,6 +1732,7 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
             state["bug_func_name"]          = all_data[0]["_debug_func_name"]   if all_data else ""
             state["bug_func_source"]        = all_data[0]["_debug_sabot_func"]  if all_data else ""
             state["original_bug_func_source"] = all_data[0]["_debug_func_source"] if all_data else ""
+            state["all_bug_data"]           = all_data  # Store all bug data for misleading comments
             
             # Store the call chain for debugging and documentation
             # Format: {bug_function_name: [surface_func, ..., bug_func]}
@@ -1651,7 +1794,9 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
 
             # Print detailed diff only in debug mode
             if state.get("debug_mode", False):
-                for target_data in all_data:
+                print(f"\n[sabotage_init] Displaying diffs for {len(all_data)} bug(s):")
+                for idx, target_data in enumerate(all_data, 1):
+                    print(f"\n[sabotage_init] === Bug #{idx}/{len(all_data)} ===")
                     diff_str = _format_bug_diff(
                         func_name        = target_data["_debug_func_name"],
                         file_start_line  = target_data["_debug_start_line"],
@@ -1661,18 +1806,29 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
                     )
                     print(diff_str)
 
+            # Success! We have at least one bug injected
+            # Note: We might have fewer bugs than requested if some injections failed,
+            # but that's OK - we tried our best with this file
+            if debug_mode and len(all_data) < n_bugs:
+                print(f"\n[sabotage_init] Note: Successfully injected {len(all_data)}/{n_bugs} bugs")
+                print(f"[sabotage_init] (Some bug injections may have failed verification)")
+            
             return state
 
         else:
             print(f"[sabotage_init] All {max_outer_attempts} attempts failed for "
                   f"{current_file} -- trying next file.")
 
-    raise RuntimeError(
-        f"This repository's functions all require package-level imports or globals and cannot "
-        f"be exec-tested in isolation (tried {len(tried_files)} file(s)). "
-        f"Try a repo that has standalone utility functions with primitive inputs/outputs "
-        f"(e.g. math helpers, string processors, algorithms)."
+    # If we get here, no file worked
+    error_msg = (
+        f"Failed to inject bug after {total_attempts} attempts across {len(tried_files)} file(s). "
+        f"Possible reasons:\n"
+        f"  - Functions require complex imports/globals that cannot be exec-tested in isolation\n"
+        f"  - Bug injection failed to produce tests with sufficient failure rate (need 2+ public, 2+ secret, 30%+ overall)\n"
+        f"  - Try a repo with simpler standalone utility functions (e.g. math helpers, string processors)\n"
+        f"Files tried: {', '.join(tried_files)}"
     )
+    raise RuntimeError(error_msg)
 
 
 def inflate_hierarchy(state: ArchitectState) -> ArchitectState:
@@ -1930,22 +2086,124 @@ def verify_sabotage(state: ArchitectState) -> ArchitectState:
     return state
 
 
+def add_misleading_comments(state: ArchitectState) -> ArchitectState:
+    """Add deliberately misleading comments in random locations to confuse students and AI.
+    
+    These comments falsely suggest bugs exist in locations where there are no bugs,
+    making it harder to find the actual injected bugs.
+    """
+    debug_mode = state.get("debug_mode", False)
+    
+    if debug_mode:
+        print("\n[misleading_comments] Adding false bug hints to confuse analysis...")
+    
+    sabotaged_code = state.get("sabotaged_code", "")
+    if not sabotaged_code:
+        return state
+    
+    try:
+        tree = ast.parse(sabotaged_code)
+    except SyntaxError:
+        if debug_mode:
+            print("[misleading_comments] Syntax error - skipping")
+        return state
+    
+    lines = sabotaged_code.splitlines()
+    
+    # Find all function definitions
+    functions = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not node.name.startswith("_intermediate_processor"):
+                functions.append((node.name, node.lineno, node.end_lineno))
+    
+    if len(functions) < 3:
+        return state  # Not enough functions to add misleading comments
+    
+    # Templates for misleading comments
+    misleading_templates = [
+        "# BUG: Check the return value here",
+        "# TODO: Fix off-by-one error in this function",
+        "# FIXME: This condition looks suspicious",
+        "# NOTE: Edge case handling might be incorrect",
+        "# WARNING: Potential bug with empty inputs",
+        "# BUG: Loop boundary needs review",
+        "# TODO: Verify this calculation is correct",
+        "# FIXME: Check for None values here",
+        "# BUG: Index manipulation looks wrong",
+        "# NOTE: Return value might be incorrect for edge cases",
+    ]
+    
+    # Select 3-5 random functions (excluding bug locations)
+    bug_func_names = set()
+    for bug_data in state.get("all_bug_data", []):
+        bug_func_names.add(bug_data.get("_debug_func_name", ""))
+    
+    # Filter out bug functions
+    safe_functions = [(name, start, end) for name, start, end in functions 
+                      if name not in bug_func_names]
+    
+    if len(safe_functions) < 2:
+        # If almost all functions have bugs, pick any function
+        safe_functions = functions
+    
+    num_comments = min(random.randint(3, 5), len(safe_functions))
+    selected_funcs = random.sample(safe_functions, num_comments)
+    
+    # Add comments to selected functions
+    insertions = []  # List of (line_index, comment_text)
+    
+    for func_name, start_line, end_line in selected_funcs:
+        # Pick a random line within the function (not the def line)
+        if end_line - start_line < 3:
+            target_line = start_line  # Insert before function def
+        else:
+            # Insert somewhere in the middle of the function
+            target_line = random.randint(start_line + 1, min(start_line + 3, end_line - 1))
+        
+        comment = random.choice(misleading_templates)
+        
+        # Find the indentation of the target line
+        if target_line - 1 < len(lines):
+            target_text = lines[target_line - 1]
+            indent = len(target_text) - len(target_text.lstrip())
+            indented_comment = " " * indent + comment
+            insertions.append((target_line - 1, indented_comment))  # 0-indexed
+    
+    # Sort by line number in reverse to insert from bottom to top
+    insertions.sort(reverse=True)
+    
+    # Insert comments
+    for line_idx, comment in insertions:
+        lines.insert(line_idx, comment)
+        if debug_mode:
+            print(f"[misleading_comments] Added at line {line_idx + 1}: {comment.strip()}")
+    
+    state["sabotaged_code"] = "\n".join(lines)
+    
+    if debug_mode:
+        print(f"[misleading_comments] Added {len(insertions)} misleading bug hints")
+    
+    return state
+
+
 def sabotage(state: ArchitectState) -> ArchitectState:
     """Full sabotage pipeline (backward-compat wrapper that runs all 5 phases in sequence).
 
     Execution path by difficulty level:
-      Level 1: sabotage_init -> code_inflation -> obfuscation_level_1 -> verify_sabotage
-      Level 2: sabotage_init -> code_inflation -> obfuscation_level_2 -> verify_sabotage
-      Level 3: sabotage_init -> code_inflation -> obfuscation_level_2
+      Level 1: sabotage_init -> inflate_hierarchy -> obfuscation_level_1 -> verify_sabotage
+      Level 2: sabotage_init -> inflate_hierarchy -> obfuscation_level_2 -> verify_sabotage
+      Level 3: sabotage_init -> inflate_hierarchy -> obfuscation_level_2
                              -> obfuscation_level_1 -> verify_sabotage
     """
     state = sabotage_init(state)
-    state = code_inflation(state)
+    state = inflate_hierarchy(state)
     level = state["difficulty_level"]
     if level in (2, 3):
         state = apply_obfuscation_level_2(state)
     if level in (1, 3):
         state = apply_obfuscation_level_1(state)
     state = verify_sabotage(state)
+    state = add_misleading_comments(state)
     return state
 
