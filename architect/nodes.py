@@ -9,6 +9,7 @@ from architect.saboteur import (
     apply_obfuscation_level_1,
     apply_obfuscation_level_2,
     verify_sabotage,
+    add_misleading_comments,
 )
 from architect.challenge_deployer import deploy_challenge
 from architect.readme_generator import create_readme
@@ -45,6 +46,11 @@ def node_obfuscation_level_2(state: ArchitectState) -> ArchitectState:
 def node_verify_sabotage(state: ArchitectState) -> ArchitectState:
     """Integrity Check: confirm bug still manifests, no crashes introduced."""
     return verify_sabotage(state)
+
+
+def node_add_misleading_comments(state: ArchitectState) -> ArchitectState:
+    """Add false bug hints in random locations to confuse AI and students."""
+    return add_misleading_comments(state)
 
 
 def node_overwrite_file(state: ArchitectState) -> ArchitectState:

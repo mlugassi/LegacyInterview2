@@ -35,8 +35,20 @@ def deploy_challenge(state: ArchitectState) -> ArchitectState:
         case_lines = []
         for tc in tests:
             args_repr = tc.get("args", "()")
-            exp_repr  = tc.get("expected", "None")
-
+            # Support both "expected" (from verification) and "correct_output" (from GPT)
+            exp_value = tc.get("expected") or tc.get("correct_output")
+            if not exp_value:
+                exp_value = "None"
+            
+            # Validate that exp_value is a valid Python literal
+            # Try to evaluate it - if it works, it's valid and we use it as-is
+            try:
+                eval(exp_value, {"__builtins__": {}})
+                exp_repr = exp_value  # Already a valid Python literal
+            except:
+                # If eval fails, wrap it as a string literal
+                exp_repr = repr(str(exp_value))
+            
             # args_repr should be a properly formatted tuple literal from GPT
             # However, GPT sometimes forgets the comma for single-element tuples
             # e.g. ('hello') instead of ('hello',)

@@ -57,5 +57,30 @@ def clone_repo(state: ArchitectState) -> ArchitectState:
     git.Repo.clone_from(url, dest)
     print(f"[cloner] Done.")
 
+    # Remove .git directory to prevent students from using git diff/log to find bugs
+    git_dir = os.path.join(dest, ".git")
+    if os.path.exists(git_dir):
+        print(f"[cloner] Removing .git directory to prevent version control analysis...")
+        _rmtree_with_retry(git_dir)
+        print(f"[cloner] .git directory removed successfully.")
+
+    # Also remove .github directory (CI/CD configs that might reveal original structure)
+    github_dir = os.path.join(dest, ".github")
+    if os.path.exists(github_dir):
+        print(f"[cloner] Removing .github directory...")
+        _rmtree_with_retry(github_dir)
+        print(f"[cloner] .github directory removed successfully.")
+
+    # Also remove git-related files that might reveal history
+    git_files = [".gitignore", ".gitattributes", ".gitmodules"]
+    for git_file in git_files:
+        git_file_path = os.path.join(dest, git_file)
+        if os.path.exists(git_file_path):
+            try:
+                os.remove(git_file_path)
+                print(f"[cloner] Removed {git_file}")
+            except Exception as e:
+                print(f"[cloner] Warning: Could not remove {git_file}: {e}")
+
     state["clone_path"] = dest
     return state

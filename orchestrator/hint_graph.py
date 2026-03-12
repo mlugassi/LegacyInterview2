@@ -240,7 +240,6 @@ def node_generate_hint(state: HintState) -> HintState:
     )
 
     system_prompt = f"""You are a helpful coding mentor for a legacy code debugging challenge.
-
 LANGUAGE RULE (mandatory — never violate):
 The student's most recent message is written in {_user_language}.
 You MUST respond entirely in {_user_language}. Do not use any other language, even partially.
