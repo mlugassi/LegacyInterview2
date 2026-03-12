@@ -29,9 +29,6 @@ Create a `.env` file in the project root:
 ```
 OPENAI_API_KEY=sk-...
 ```
-
-> For Intel corporate network, uncomment the proxy lines near the top of `challenge.py`.
-
 ---
 
 ## Quick Start
@@ -48,16 +45,15 @@ Opens at `http://localhost:7860`. Fill in the GitHub URL and settings in the bro
 
 ```bash
 # Default settings
-python challenge.py https://github.com/mahmoud/boltons.git
+python challenge.py
 
 # Full example
-python challenge.py https://github.com/mahmoud/boltons.git \
-    --name "Alice Smith" \
-    --nesting-level 5 \
-    --num-bugs 3 \
+python challenge.py <pyhon_git_repo_path> \
+    --name <student_name> \
+    --nesting-level <num_of_nested_level> \
+    --num-bugs <num_of_injected_bugs> \
     --refactoring \
     --debug \
-    --timer 45 \
     --port 7860
 ```
 
@@ -69,8 +65,6 @@ python challenge.py https://github.com/mahmoud/boltons.git \
 | `--nesting-level N` | `3` | Call-chain depth (1–6). Higher = harder |
 | `--num-bugs N` | `1` | Number of bugs to inject (1–5) |
 | `--refactoring` | off | Obfuscate variables and add misleading comments |
-| `--debug` | off | Show call-chain visualization and verbose logs |
-| `--timer N` | `0` | Challenge countdown in minutes (0 = no timer) |
 | `--port N` | `7860` | Gradio server port |
 | `--share` | off | Create a public Gradio share link |
 
@@ -121,7 +115,6 @@ LegacyInterview2/
 **Setup page** (GUI mode only)
 - Enter GitHub URL, student name, nesting level, number of bugs
 - Enable refactoring and/or debug mode
-- Set an optional countdown timer
 - Click **Start Challenge** — pipeline runs (~1–2 min)
 
 **Challenge page**
@@ -203,7 +196,7 @@ python challenge.py https://github.com/mahmoud/boltons.git --nesting-level 2
 
 # Hard challenge with obfuscation, 3 bugs, 45-minute timer
 python challenge.py https://github.com/mahmoud/boltons.git \
-    --nesting-level 5 --num-bugs 3 --refactoring --timer 45
+    --nesting-level 5 --num-bugs 3 --refactoring
 
 # Verify the generated challenge
 cat workspaces/boltons/detailed_explanation.txt
