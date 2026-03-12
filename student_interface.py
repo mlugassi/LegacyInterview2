@@ -35,25 +35,34 @@ class ChallengeState:
 
         self.github_url:       str  = data.get("github_url", "")
         # Normalise to forward slashes so comparisons work cross-platform
-        self.target_file:      str  = Path(data.get("target_file", "")).as_posix()
+        raw_target = data.get("target_file", "")
+        try:
+            self.target_file: str = Path(raw_target).resolve().relative_to(self.workspace.resolve()).as_posix()
+        except (ValueError, OSError):
+            self.target_file = Path(raw_target).as_posix()
         self.original_code:    str  = data.get("original_code", "")
         self.sabotaged_code:   str  = data.get("sabotaged_code", "")
         self.function_name:    str  = data.get("function_name", "")
         self.bug_func_name:           str  = data.get("bug_func_name", "")
         self.original_bug_func_source: str  = data.get("original_bug_func_source", "")
+        self.bug_func_names: list = data.get("bug_func_names", []) or (
+            [self.bug_func_name] if self.bug_func_name else []
+        )
+        self.bug_func_sources_list: list = data.get("bug_func_sources_list", [])
+        self.original_bug_func_sources_list: list = data.get("original_bug_func_sources_list", [])
         self.nesting_level:    int  = data.get("nesting_level", 3)
         self.refactoring_enabled: bool = data.get("refactoring_enabled", False)
         self.debug_mode:       bool = data.get("debug_mode", False)
 
         # sabotaged_files: {rel_posix_path: content} for every file the
-        # saboteur touched.  Primary source: .challenge_snapshot/ directory
+        # saboteur touched.  Primary source: .metadata/ directory
         # written by the deployer immediately after sabotage (always up-to-date).
         # Fallback: sabotaged_files dict in JSON, then single sabotaged_code field.
-        snapshot_dir = self.workspace / ".challenge_snapshot"
+        snapshot_dir = self.workspace / ".metadata"
         snap_files: dict[str, str] = {}
         if snapshot_dir.exists():
             for snap_path in snapshot_dir.iterdir():
-                if snap_path.is_file():
+                if snap_path.is_file() and snap_path.name != "challenge_run_secret.py":
                     # filename encodes the relative path: separators replaced by __
                     rel_posix = snap_path.name.replace("__", "/")
                     try:
@@ -95,7 +104,7 @@ class ChallengeState:
         files = sorted(self.workspace.rglob("*.py"))
         return [
             f.relative_to(self.workspace).as_posix() for f in files
-            if ".challenge_snapshot" not in f.parts
+            if ".metadata" not in f.parts
         ]
 
     def read_py_file(self, rel_path: str) -> str:
@@ -112,12 +121,16 @@ class ChallengeState:
 
     def challenge_info(self) -> dict:
         return {
-            "function_name":       self.function_name,
-            "bug_func_name":       self.bug_func_name,
-            "target_file":         self.target_file,
-            "nesting_level":       self.nesting_level,
-            "refactoring_enabled": self.refactoring_enabled,
-            "debug_mode":          self.debug_mode,
+            "function_name":                  self.function_name,
+            "bug_func_name":                  self.bug_func_name,
+            "target_file":                    self.target_file,
+            "nesting_level":                  self.nesting_level,
+            "refactoring_enabled":            self.refactoring_enabled,
+            "debug_mode":                     self.debug_mode,
+            "bug_func_names":                 self.bug_func_names,
+            "bug_func_sources_list":          self.bug_func_sources_list,
+            "original_bug_func_sources_list": self.original_bug_func_sources_list,
+            "original_code":                  self.original_code,
         }
 
 
@@ -216,6 +229,9 @@ def _run_pipeline(github_url: str, nesting_level: int, num_bugs: int,
         "bug_func_name":       result.get("bug_func_name",    ""),
         "bug_func_source":          result.get("bug_func_source",           ""),
         "original_bug_func_source": result.get("original_bug_func_source",  ""),
+        "bug_func_names":              result.get("bug_func_names",              []),
+        "bug_func_sources_list":       result.get("bug_func_sources_list",       []),
+        "original_bug_func_sources_list": result.get("original_bug_func_sources_list", []),
         "test_cases":          result.get("test_cases",       []),
         "public_tests":        result.get("public_tests",     []),
         "secret_tests":        result.get("secret_tests",     []),
@@ -274,13 +290,7 @@ def _make_js(timer_minutes: int = 0) -> str:
         tick();
         window._timerInterval = setInterval(tick, 1000);
     };
-    document.addEventListener('keydown', function(e) {
-        if ((e.ctrlKey || e.metaKey) && e.key === 's') {
-            e.preventDefault();
-            const btn = document.getElementById('save-btn');
-            if (btn) btn.click();
-        }
-    }, true);""" + auto_start + "\n}"
+""" + auto_start + "\n}"
 
 
 _JS = _make_js(0)
@@ -325,6 +335,31 @@ def _hint_md(hints_used: int, penalty: int) -> str:
         f"Hints used: **{hints_used}** &nbsp;|&nbsp; Penalty: **{penalty} pts** &nbsp; "
         f"_(−2 / −6 / −12 / −20 / −30)_"
     )
+
+
+_HINT_DECLINES = {
+    "no", "nope", "nah", "not now", "nevermind", "never mind",
+    "no thanks", "no thank you", "skip", "cancel", "forget it",
+    "don't", "dont", "no hint", "stop",
+}
+_CONFIRMATION_KWS = ["would you like", "shall i", "want me to", "proceed", "penalty to your score"]
+
+
+def _is_decline(msg: str) -> bool:
+    m = msg.strip().lower()
+    return (
+        m in _HINT_DECLINES
+        or m.startswith("no ")
+        or m.startswith("don't")
+        or m.startswith("dont")
+        or m.startswith("nope ")
+        or m.startswith("nah ")
+    )
+
+
+def _is_confirmation_question(text: str) -> bool:
+    t = text.lower()
+    return any(kw in t for kw in _CONFIRMATION_KWS)
 
 
 def _colorise_test_output(raw: str) -> str:
@@ -469,94 +504,60 @@ def _extract_function_source(code: str, func_name: str) -> str:
     return ""
 
 
-def _compute_expected_fixed_code(cs: "ChallengeState") -> str | None:
+def _apply_one_bug_fix(
+    current_code: str,
+    func_name: str,
+    orig_pre: str,
+    sabot_pre: str,
+) -> str | None:
     """
-    Compute the expected correct version of the sabotaged file by surgically
-    replacing only the injected bug tokens (using the pre-transform pair).
+    Apply the fix for a single injected bug by surgically patching func_name
+    inside current_code.  Returns the patched file content, or None if the
+    fix could not be determined.
 
-    Strategy: character-level diff between orig_pre and sabot_pre surfaces the
-    exact changed substrings (e.g. 'plural' vs 'plural[:-1]').  Those same
-    substrings survive obfuscation, so we can find-and-replace them directly
-    in the fully-obfuscated sabotaged_code.
-    Returns None if the replacement cannot be determined.
+    Strategy: character-level diff between orig_pre (correct pre-transform
+    source) and sabot_pre (buggy pre-transform source) surfaces the exact
+    changed tokens.  Those tokens survive obfuscation so we can
+    find-and-replace them directly in the fully-obfuscated current_code.
     """
     import difflib
-    import json as _json
 
-    # orig_pre: correct pre-transform function.
-    # Use stored value if available, otherwise extract live from original_code.
-    orig_pre = (
-        cs.original_bug_func_source
-        or _extract_function_source(cs.original_code, cs.bug_func_name)
-    )
-
-    # sabot_pre: sabotaged (buggy) pre-transform function — always from JSON.
-    sabot_pre = ""
-    try:
-        _data = _json.loads((cs.workspace / "challenge_state.json").read_text(encoding="utf-8"))
-        sabot_pre = _data.get("bug_func_source", "")
-    except Exception:
-        pass
-
-    if not (orig_pre and sabot_pre):
+    func_in_code = _extract_function_source(current_code, func_name)
+    if not func_in_code:
         return None
 
-    # Use snapshot as the base (always matches what the student received on disk).
-    # Fall back to cs.sabotaged_code only if no snapshot entry exists for the target.
-    try:
-        target_rel = cs.target_path.resolve().relative_to(cs.workspace.resolve()).as_posix()
-    except ValueError:
-        target_rel = ""
-    received_code = cs.sabotaged_files.get(target_rel) or cs.sabotaged_code
-
-    # Extract the sabotaged function's exact text from received_code.
-    # All replacements are scoped to this substring so we never accidentally
-    # patch code outside the target function.
-    func_in_received = _extract_function_source(received_code, cs.bug_func_name)
-    if not func_in_received:
-        return None  # can't locate function in the file — give up
-
-    # Character-level diff: find exactly what changed between correct and buggy.
-    # We use context-aware replacement: for each changed fragment in sabot_pre,
-    # extend left until we hit a non-identifier char so we get a unique search term
-    # (e.g. 'plural[:-1]' instead of just '[:-1]').
     matcher = difflib.SequenceMatcher(None, orig_pre, sabot_pre, autojunk=False)
     opcodes = matcher.get_opcodes()
 
-    # Work on just the function text, not the whole file.
-    fixed_func = func_in_received
+    fixed_func = func_in_code
     changed = False
 
     for tag, i1, i2, j1, j2 in opcodes:
         if tag == "equal":
             continue
 
-        orig_frag  = orig_pre[i1:i2]   # correct fragment
-        sabot_frag = sabot_pre[j1:j2]  # buggy fragment
+        orig_frag  = orig_pre[i1:i2]
+        sabot_frag = sabot_pre[j1:j2]
 
-        # Skip pure-whitespace/newline differences (formatting noise, not bugs).
         if not orig_frag.strip() and not sabot_frag.strip():
             continue
 
         if tag in ("replace", "insert"):
-            # Build a context-extended search/replace pair so we don't
-            # accidentally match a shorter fragment elsewhere in the function.
-            # Walk left in both strings to the same word boundary.
             if not sabot_frag.strip():
                 continue
 
             ctx_start_orig  = i1
             ctx_start_sabot = j1
             while ctx_start_orig > 0 and ctx_start_sabot > 0:
-                co = orig_pre[ctx_start_orig - 1]
+                co  = orig_pre[ctx_start_orig - 1]
                 cs_ = sabot_pre[ctx_start_sabot - 1]
                 if co != cs_ or not (co.isalnum() or co == "_"):
                     break
                 ctx_start_orig  -= 1
                 ctx_start_sabot -= 1
 
-            search_str  = sabot_pre[ctx_start_sabot:j2]   # buggy (with context)
-            replace_str = orig_pre[ctx_start_orig:i2]      # correct (with context)
+            search_str  = sabot_pre[ctx_start_sabot:j2]
+            replace_str = orig_pre[ctx_start_orig:i2]
 
             if search_str and search_str in fixed_func:
                 fixed_func = fixed_func.replace(search_str, replace_str, 1)
@@ -566,19 +567,14 @@ def _compute_expected_fixed_code(cs: "ChallengeState") -> str | None:
                 changed = True
 
         elif tag == "delete":
-            # Something exists in orig but was removed in sabot (e.g. +1).
-            # Find the surrounding context in sabot_pre and reinsert the deleted text.
             if not orig_frag.strip():
                 continue
 
-            # Take left context from sabot_pre and clip right context at first newline
-            # (comments/indentation differ between pre-transform and obfuscated code).
-            ctx_left  = sabot_pre[max(0, j1 - 30):j1]
+            ctx_left      = sabot_pre[max(0, j1 - 30):j1]
             ctx_right_raw = sabot_pre[j2:j2 + 20]
-            nl = ctx_right_raw.find("\n")
-            ctx_right = ctx_right_raw[:nl] if nl != -1 else ctx_right_raw
+            nl            = ctx_right_raw.find("\n")
+            ctx_right     = ctx_right_raw[:nl] if nl != -1 else ctx_right_raw
 
-            # Trim left context leftward until we find a match in fixed_func
             for trim in range(len(ctx_left)):
                 search_str  = ctx_left[trim:] + ctx_right
                 replace_str = ctx_left[trim:] + orig_frag + ctx_right
@@ -587,15 +583,65 @@ def _compute_expected_fixed_code(cs: "ChallengeState") -> str | None:
                     changed = True
                     break
 
-    if not changed or fixed_func == func_in_received:
+    if not changed or fixed_func == func_in_code:
         return None
 
-    # Splice the patched function back into the full file.
-    fixed = received_code.replace(func_in_received, fixed_func, 1)
-    if fixed != received_code:
-        return fixed
+    fixed = current_code.replace(func_in_code, fixed_func, 1)
+    return fixed if fixed != current_code else None
 
-    return None
+
+def _compute_expected_fixed_code(cs: "ChallengeState") -> str | None:
+    """
+    Compute the expected correct version of the sabotaged file by applying
+    surgical fixes for every injected bug.  Supports num_bugs > 1 by
+    iterating over all (func_name, orig_pre, sabot_pre) triples stored in
+    challenge_state.json.
+    Returns None if no fix could be determined.
+    """
+    import json as _json
+
+    try:
+        _data = _json.loads((cs.workspace / "challenge_state.json").read_text(encoding="utf-8"))
+    except Exception:
+        _data = {}
+
+    # Multi-bug lists (written by the new pipeline). Fall back to single-bug
+    # fields for workspaces generated before this change.
+    bug_func_names      = _data.get("bug_func_names") or cs.bug_func_names
+    sabot_sources_list  = _data.get("bug_func_sources_list") or []
+    orig_sources_list   = _data.get("original_bug_func_sources_list") or []
+
+    # Single-bug fallback: wrap scalar fields in lists
+    if not bug_func_names and cs.bug_func_name:
+        bug_func_names = [cs.bug_func_name]
+    if not sabot_sources_list:
+        sabot_sources_list = [_data.get("bug_func_source", "")]
+    if not orig_sources_list:
+        orig_sources_list = [
+            cs.original_bug_func_source
+            or _extract_function_source(cs.original_code, cs.bug_func_name)
+        ]
+
+    if not bug_func_names:
+        return None
+
+    # Use the snapshot as the starting point (matches what the student received).
+    try:
+        target_rel = cs.target_path.resolve().relative_to(cs.workspace.resolve()).as_posix()
+    except ValueError:
+        target_rel = ""
+    current_code = cs.sabotaged_files.get(target_rel) or cs.sabotaged_code
+
+    any_changed = False
+    for func_name, orig_pre, sabot_pre in zip(bug_func_names, orig_sources_list, sabot_sources_list):
+        if not (orig_pre and sabot_pre):
+            continue
+        result = _apply_one_bug_fix(current_code, func_name, orig_pre, sabot_pre)
+        if result is not None:
+            current_code = result
+            any_changed = True
+
+    return current_code if any_changed else None
 
 
 def _expected_fix_diff_html(cs: "ChallengeState", submitted_code: str = "") -> str:
@@ -618,14 +664,17 @@ def _expected_fix_diff_html(cs: "ChallengeState", submitted_code: str = "") -> s
 
     # ── Fallback: function-level or full-file diff ────────────────────────────
     if expected_fixed is None:
-        if func:
-            sabot_func = _extract_function_source(received_code, func)
-            orig_func  = _extract_function_source(cs.original_code, func)
+        approx = received_code
+        for fn in cs.bug_func_names:
+            sabot_func = _extract_function_source(approx, fn)
+            orig_func  = _extract_function_source(cs.original_code, fn)
             if sabot_func and orig_func:
-                expected_fixed_approx = received_code.replace(sabot_func, orig_func, 1)
-                if expected_fixed_approx != received_code:
-                    expected_fixed = expected_fixed_approx
-        if expected_fixed is None:
+                candidate = approx.replace(sabot_func, orig_func, 1)
+                if candidate != approx:
+                    approx = candidate
+        if approx != received_code:
+            expected_fixed = approx
+        else:
             return _diff_html(received_code, cs.original_code, target_rel, target_rel)
 
     # ── Section 1: expected fix ───────────────────────────────────────────────
@@ -838,40 +887,40 @@ def _combined_changes_html(cs: "ChallengeState", submitted_code: str = "") -> st
     return col_headers + "".join(rows) + verdict
 
 
-def _hints_html(history: list) -> str:
-    """Render the hint conversation history as HTML."""
-    if not history:
+def _hints_html(hint_log: list) -> str:
+    """Render hint log: list of {"summary": str, "response": str}."""
+
+    def _esc(s: str) -> str:
+        return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+    entries = [e for e in (hint_log or []) if isinstance(e, dict)]
+
+    if not entries:
         return "<p style='color:#888;font-style:italic;'>No hints were used.</p>"
 
-    parts = []
-    for entry in history:
-        if isinstance(entry, dict):
-            role    = entry.get("role", "")
-            content = entry.get("content", "")
-        else:
-            role, content = ("user", entry[0]) if entry[0] else ("assistant", entry[1])
+    parts: list[str] = []
+    for n, entry in enumerate(entries, 1):
+        summary = entry.get("summary", "").strip()
+        if not summary:
+            # Fallback: first sentence of the response
+            first_line = entry.get("response", "").split("\n")[0].strip()
+            dot = first_line.find(". ")
+            summary = first_line[: dot + 1] if dot != -1 else first_line
+        if len(summary) > 160:
+            summary = summary[:157] + "…"
+        parts.append(
+            f'<div style="margin:6px 0;padding:8px 14px;border:1px solid #374151;'
+            f'border-radius:8px;background:#1a2e1a;">'
+            f'<span style="color:#93c5fd;font-weight:bold;margin-right:10px;">Hint #{n}</span>'
+            f'<span style="color:#86efac;">{_esc(summary)}</span>'
+            f'</div>'
+        )
 
-        # Gradio multimodal messages can have content as a list of parts
-        if isinstance(content, list):
-            content = " ".join(str(p) for p in content if p)
-        content = str(content) if content is not None else ""
-
-        escaped = content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        if role == "user":
-            parts.append(
-                f'<div style="margin:6px 0;padding:8px 12px;background:#1e3a5f;'
-                f'border-radius:6px;color:#93c5fd;">'
-                f'<strong>You:</strong> {escaped}</div>'
-            )
-        elif role == "assistant":
-            parts.append(
-                f'<div style="margin:6px 0;padding:8px 12px;background:#1a2e1a;'
-                f'border-radius:6px;color:#86efac;">'
-                f'<strong>AI:</strong> {escaped}</div>'
-            )
-
+    header = (f'<p style="color:#888;font-size:0.85em;margin:0 0 8px 0;">'
+              f'{len(entries)} hint(s) used</p>')
     return (
-        '<div style="max-height:50vh;overflow-y:auto;padding:4px;">'
+        header
+        + '<div style="max-height:50vh;overflow-y:auto;padding:4px;">'
         + "".join(parts)
         + "</div>"
     )
@@ -935,10 +984,12 @@ def create_full_interface() -> gr.Blocks:
     with gr.Blocks(title="Legacy Code Challenge") as demo:
 
         # Shared state
-        workspace_state        = gr.State("")
-        hints_used_state       = gr.State(0)
-        submission_count_state = gr.State(0)
-        timer_trigger          = gr.Number(value=0, visible=False)
+        workspace_state           = gr.State("")
+        hints_used_state          = gr.State(0)
+        submission_count_state    = gr.State(0)
+        hint_log_state            = gr.State([])
+        confirmation_pending_state = gr.State(False)
+        timer_trigger             = gr.Number(value=0, visible=False)
 
         # ════════════════════════════════════════════════════════════════════
         # PAGE 1 — Setup
@@ -1103,7 +1154,7 @@ def create_full_interface() -> gr.Blocks:
                     gr.update(interactive=True),
                     gr.update(visible=False),
                     gr.update(visible=True),
-                    gr.update(value=f"### 🐛 Legacy Code Challenge &nbsp;|&nbsp; Nesting Level {nesting}{suffix}"),
+                    gr.update(value=f"### 🐛 Legacy Code Challenge{suffix}"),
                     gr.update(value=cs.readme()),
                     gr.update(choices=py_files, value=default),
                     gr.update(value=cs.read_target(), label=cs.target_file, interactive=True),
@@ -1182,7 +1233,7 @@ def create_full_interface() -> gr.Blocks:
             cs.reset_target()
             return cs.sabotaged_code, gr.update(selected=1)
 
-        def on_submit(hints_used, submit_count, workspace_path, history):
+        def on_submit(hints_used, submit_count, workspace_path, hint_log):
             _loading = '<p style="text-align:center;padding:40px;color:#888;font-size:1.2em;">⏳ Running tests…</p>'
             yield (
                 gr.update(visible=False),
@@ -1206,6 +1257,7 @@ def create_full_interface() -> gr.Blocks:
                     hints_used=hints_used,
                     sabotaged_code=cs.sabotaged_code,
                     target_file=str(cs.target_path),
+                    bug_func_names=cs.bug_func_names,
                 )
                 log.save(submitted_code, result, hints_used)
                 new_count = submit_count + 1
@@ -1213,7 +1265,7 @@ def create_full_interface() -> gr.Blocks:
                 score_html     = _score_summary_html(result)
                 combined_diff  = _combined_changes_html(cs, submitted_code)
                 test_html      = _colorise_test_output(result["test_output"] or "No test output.")
-                hints_html     = _hints_html(history or [])
+                hints_html     = _hints_html(hint_log or [])
 
                 yield (
                     gr.update(), gr.update(),
@@ -1224,16 +1276,16 @@ def create_full_interface() -> gr.Blocks:
                 err = f"<p style='color:#ef4444;padding:20px;font-family:monospace;'>❌ Error during evaluation:<br>{exc}</p>"
                 yield (gr.update(), gr.update(), err, "", "", "", submit_count)
 
-        def on_send(message, history, hints_used, submit_count, workspace_path):
+        def on_send(message, history, hints_used, submit_count, workspace_path, hint_log, confirmation_pending):
             if not message.strip():
                 penalty = PENALTY_TABLE[min(hints_used, len(PENALTY_TABLE) - 1)]
-                return history, "", hints_used, _hint_md(hints_used, penalty)
+                return history, "", hints_used, _hint_md(hints_used, penalty), hint_log, confirmation_pending
             if not workspace_path:
                 history = list(history or []) + [
                     {"role": "user",      "content": message},
                     {"role": "assistant", "content": "No challenge loaded yet."},
                 ]
-                return history, "", hints_used, _hint_md(hints_used, 0)
+                return history, "", hints_used, _hint_md(hints_used, 0), hint_log, False
             cs = ChallengeState(workspace_path)
             result = get_hint(
                 user_message=message,
@@ -1242,13 +1294,22 @@ def create_full_interface() -> gr.Blocks:
                 submission_attempts=submit_count,
                 challenge_info=cs.challenge_info(),
             )
+            # Python-level guarantee: if a confirmation was pending and the student
+            # didn't explicitly decline, the hint counts — regardless of LLM marker.
+            accepted_pending = confirmation_pending and not _is_decline(message)
+            gave_hint = result["gave_hint"] or accepted_pending
+            new_confirmation_pending = not gave_hint and _is_confirmation_question(result["response"])
+
             history = list(history or []) + [
                 {"role": "user",      "content": message},
                 {"role": "assistant", "content": result["response"]},
             ]
-            new_hints = hints_used + (1 if result["gave_hint"] else 0)
+            new_hints = hints_used + (1 if gave_hint else 0)
             penalty   = PENALTY_TABLE[min(new_hints, len(PENALTY_TABLE) - 1)]
-            return history, "", new_hints, _hint_md(new_hints, penalty)
+            new_log   = list(hint_log or [])
+            if gave_hint:
+                new_log.append({"summary": result.get("hint_summary", ""), "response": result["response"]})
+            return history, "", new_hints, _hint_md(new_hints, penalty), new_log, new_confirmation_pending
 
         # ── Wiring ────────────────────────────────────────────────────────
 
@@ -1271,7 +1332,7 @@ def create_full_interface() -> gr.Blocks:
         submit_btn.click(
             on_submit,
             inputs=[hints_used_state, submission_count_state,
-                    workspace_state, chatbot],
+                    workspace_state, hint_log_state],
             outputs=[
                 challenge_page, results_page,
                 score_summary_html,
@@ -1283,13 +1344,13 @@ def create_full_interface() -> gr.Blocks:
         )
         send_btn.click(
             on_send,
-            inputs=[chat_input, chatbot, hints_used_state, submission_count_state, workspace_state],
-            outputs=[chatbot, chat_input, hints_used_state, hint_counter],
+            inputs=[chat_input, chatbot, hints_used_state, submission_count_state, workspace_state, hint_log_state, confirmation_pending_state],
+            outputs=[chatbot, chat_input, hints_used_state, hint_counter, hint_log_state, confirmation_pending_state],
         )
         chat_input.submit(
             on_send,
-            inputs=[chat_input, chatbot, hints_used_state, submission_count_state, workspace_state],
-            outputs=[chatbot, chat_input, hints_used_state, hint_counter],
+            inputs=[chat_input, chatbot, hints_used_state, submission_count_state, workspace_state, hint_log_state, confirmation_pending_state],
+            outputs=[chatbot, chat_input, hints_used_state, hint_counter, hint_log_state, confirmation_pending_state],
         )
 
     return demo
@@ -1310,12 +1371,14 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
 
     with gr.Blocks(title="Legacy Code Challenge", js=_make_js(timer_minutes)) as demo:
 
-        hints_used_state       = gr.State(0)
-        submission_count_state = gr.State(0)
+        hints_used_state          = gr.State(0)
+        submission_count_state    = gr.State(0)
+        hint_log_state            = gr.State([])
+        confirmation_pending_state = gr.State(False)
 
         with gr.Row(elem_classes=["header-row"]):
             gr.Markdown(
-                f"### 🐛 Legacy Code Challenge &nbsp;|&nbsp; Nesting Level {cs.nesting_level}{name_suffix}",
+                f"### 🐛 Legacy Code Challenge{name_suffix}",
                 elem_classes=["app-header"],
             )
             gr.HTML('<span id="timer-inner"></span>', elem_id="challenge-timer")
@@ -1416,7 +1479,7 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
             cs.reset_target()
             return cs.sabotaged_code, gr.update(selected=1)
 
-        def on_submit(hints_used, submit_count, history):
+        def on_submit(hints_used, submit_count, hint_log):
             _loading = '<p style="text-align:center;padding:40px;color:#888;font-size:1.2em;">⏳ Running tests…</p>'
             yield (
                 gr.update(visible=False),
@@ -1435,6 +1498,7 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
                     hints_used=hints_used,
                     sabotaged_code=cs.sabotaged_code,
                     target_file=str(cs.target_path),
+                    bug_func_names=cs.bug_func_names,
                 )
                 log.save(submitted_code, result, hints_used)
                 new_count = submit_count + 1
@@ -1442,7 +1506,7 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
                 score_html    = _score_summary_html(result)
                 combined_diff = _combined_changes_html(cs, submitted_code)
                 test_html     = _colorise_test_output(result["test_output"] or "No test output.")
-                hints_html    = _hints_html(history or [])
+                hints_html    = _hints_html(hint_log or [])
 
                 yield (
                     gr.update(), gr.update(),
@@ -1453,22 +1517,31 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
                 err = f"<p style='color:#ef4444;padding:20px;font-family:monospace;'>❌ Error during evaluation:<br>{exc}</p>"
                 yield (gr.update(), gr.update(), err, "", "", "", submit_count)
 
-        def on_send(message, history, hints_used, submit_count):
+        def on_send(message, history, hints_used, submit_count, hint_log, confirmation_pending):
             if not message.strip():
                 penalty = PENALTY_TABLE[min(hints_used, len(PENALTY_TABLE) - 1)]
-                return history, "", hints_used, _hint_md(hints_used, penalty)
+                return history, "", hints_used, _hint_md(hints_used, penalty), hint_log, confirmation_pending
             result = get_hint(
                 user_message=message, history=history,
                 hints_used=hints_used, submission_attempts=submit_count,
                 challenge_info=cs.challenge_info(),
             )
+            # Python-level guarantee: if a confirmation was pending and the student
+            # didn't explicitly decline, the hint counts — regardless of LLM marker.
+            accepted_pending = confirmation_pending and not _is_decline(message)
+            gave_hint = result["gave_hint"] or accepted_pending
+            new_confirmation_pending = not gave_hint and _is_confirmation_question(result["response"])
+
             history = list(history or []) + [
                 {"role": "user",      "content": message},
                 {"role": "assistant", "content": result["response"]},
             ]
-            new_hints = hints_used + (1 if result["gave_hint"] else 0)
+            new_hints = hints_used + (1 if gave_hint else 0)
             penalty   = PENALTY_TABLE[min(new_hints, len(PENALTY_TABLE) - 1)]
-            return history, "", new_hints, _hint_md(new_hints, penalty)
+            new_log   = list(hint_log or [])
+            if gave_hint:
+                new_log.append({"summary": result.get("hint_summary", ""), "response": result["response"]})
+            return history, "", new_hints, _hint_md(new_hints, penalty), new_log, new_confirmation_pending
 
         # ── Wiring ────────────────────────────────────────────────────────
 
@@ -1486,7 +1559,7 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
 
         submit_btn.click(
             on_submit,
-            inputs=[hints_used_state, submission_count_state, chatbot],
+            inputs=[hints_used_state, submission_count_state, hint_log_state],
             outputs=[
                 challenge_col, results_col,
                 score_summary_html,
@@ -1498,13 +1571,13 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
         )
         send_btn.click(
             on_send,
-            inputs=[chat_input, chatbot, hints_used_state, submission_count_state],
-            outputs=[chatbot, chat_input, hints_used_state, hint_counter],
+            inputs=[chat_input, chatbot, hints_used_state, submission_count_state, hint_log_state, confirmation_pending_state],
+            outputs=[chatbot, chat_input, hints_used_state, hint_counter, hint_log_state, confirmation_pending_state],
         )
         chat_input.submit(
             on_send,
-            inputs=[chat_input, chatbot, hints_used_state, submission_count_state],
-            outputs=[chatbot, chat_input, hints_used_state, hint_counter],
+            inputs=[chat_input, chatbot, hints_used_state, submission_count_state, hint_log_state, confirmation_pending_state],
+            outputs=[chatbot, chat_input, hints_used_state, hint_counter, hint_log_state, confirmation_pending_state],
         )
 
     return demo

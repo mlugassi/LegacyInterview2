@@ -207,30 +207,40 @@ def deploy_challenge(state: ArchitectState) -> ArchitectState:
         f.write(state.get("detailed_explanation", "No detailed explanation available."))
     print(f"[deployer] Written: {detailed_path}")
 
-    # Write snapshot of every file modified by the saboteur to .challenge_snapshot/
-    # This lets the student interface compute exact diffs against what was received,
-    # even if the JSON is later regenerated or becomes stale.
-    snapshot_dir = os.path.join(clone_path, ".challenge_snapshot")
-    os.makedirs(snapshot_dir, exist_ok=True)
+    # ── .metadata/ directory ──────────────────────────────────────────────────
+    # Contains the sabotaged-file snapshot AND the secret test file.
+    # Hidden + read-only so students cannot accidentally access or overwrite them.
+    metadata_dir = os.path.join(clone_path, ".metadata")
+    os.makedirs(metadata_dir, exist_ok=True)
 
+    # 1. Secret test file (hidden inside .metadata, not in workspace root)
+    secret_run_path = os.path.join(metadata_dir, "challenge_run_secret.py")
+    secret_content = _build_test_file_content(secret_tests, "secret", in_subdir=True)
+    if os.path.exists(secret_run_path):
+        os.chmod(secret_run_path, stat.S_IWRITE)
+    with open(secret_run_path, "w", encoding="utf-8") as f:
+        f.write(secret_content)
+    os.chmod(secret_run_path, stat.S_IREAD | stat.S_IRGRP | stat.S_IROTH)
+    print(f"[deployer] Written (secret): {secret_run_path}  ({len(secret_tests)} secret test cases)")
+
+    # 2. Snapshot of every file the saboteur touched
     target_file = state.get("target_file", "")
     sabotaged_code = state.get("sabotaged_code", "")
     if target_file and sabotaged_code:
         rel = os.path.relpath(target_file, clone_path)           # e.g. boltons/strutils.py
-        snap_path = os.path.join(snapshot_dir, rel.replace(os.sep, "__"))
-        # Remove read-only flag first in case we're overwriting a previous run
+        snap_path = os.path.join(metadata_dir, rel.replace(os.sep, "__"))
         if os.path.exists(snap_path):
             os.chmod(snap_path, stat.S_IWRITE)
         with open(snap_path, "w", encoding="utf-8") as f:
             f.write(sabotaged_code)
-        # Mark read-only so the student can't accidentally overwrite it
         os.chmod(snap_path, stat.S_IREAD | stat.S_IRGRP | stat.S_IROTH)
-        # Hide the directory on Windows
-        try:
-            import subprocess as _sp
-            _sp.run(["attrib", "+H", snapshot_dir], check=False, capture_output=True)
-        except Exception:
-            pass
         print(f"[deployer] Snapshot: {snap_path}")
+
+    # Hide the whole .metadata directory on Windows
+    try:
+        import subprocess as _sp
+        _sp.run(["attrib", "+H", "+R", metadata_dir], check=False, capture_output=True)
+    except Exception:
+        pass
 
     return state
