@@ -213,15 +213,14 @@ def deploy_challenge(state: ArchitectState) -> ArchitectState:
     metadata_dir = os.path.join(clone_path, ".metadata")
     os.makedirs(metadata_dir, exist_ok=True)
 
-    # 1. Secret test file (hidden inside .metadata, not in workspace root)
-    secret_run_path = os.path.join(metadata_dir, "challenge_run_secret.py")
-    secret_content = _build_test_file_content(secret_tests, "secret", in_subdir=True)
-    if os.path.exists(secret_run_path):
-        os.chmod(secret_run_path, stat.S_IWRITE)
-    with open(secret_run_path, "w", encoding="utf-8") as f:
+    # 1. Copy secret test file to hidden .metadata directory
+    secret_metadata_path = os.path.join(metadata_dir, "challenge_run_secret.py")
+    if os.path.exists(secret_metadata_path):
+        os.chmod(secret_metadata_path, stat.S_IWRITE)
+    with open(secret_metadata_path, "w", encoding="utf-8") as f:
         f.write(secret_content)
-    os.chmod(secret_run_path, stat.S_IREAD | stat.S_IRGRP | stat.S_IROTH)
-    print(f"[deployer] Written (secret): {secret_run_path}  ({len(secret_tests)} secret test cases)")
+    os.chmod(secret_metadata_path, stat.S_IREAD | stat.S_IRGRP | stat.S_IROTH)
+    print(f"[deployer] Copied to metadata: {secret_metadata_path}")
 
     # 2. Snapshot of every file the saboteur touched
     target_file = state.get("target_file", "")
