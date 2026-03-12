@@ -176,14 +176,36 @@ def node_generate_hint(state: HintState) -> HintState:
             c = " ".join(str(p) for p in c if p)
         return str(c) if c else ""
 
-    last_user_msg = _msg_text(state["messages"][-1]).strip().lower() if state["messages"] else ""
+    last_user_msg_raw  = _msg_text(state["messages"][-1]).strip() if state["messages"] else ""
+    last_user_msg      = last_user_msg_raw.lower()
 
-    # Detect explicit DECLINES — much more reliable than trying to catch every affirmation.
-    # Any response that isn't a clear decline is assumed to be accepting the hint.
+    # Detect the language from the user's message so the LLM can be instructed explicitly.
+    def _detect_language(text: str) -> str:
+        """Return a human-readable language name based on the script used."""
+        for ch in text:
+            cp = ord(ch)
+            if 0x0590 <= cp <= 0x05FF:   # Hebrew block
+                return "Hebrew"
+            if 0x0600 <= cp <= 0x06FF:   # Arabic block
+                return "Arabic"
+            if 0x0400 <= cp <= 0x04FF:   # Cyrillic block
+                return "Russian"
+            if 0x4E00 <= cp <= 0x9FFF:   # CJK block
+                return "Chinese"
+        return "English"
+
+    _user_language = _detect_language(last_user_msg_raw)
+
+    # Detect explicit DECLINES — multilingual (English + Hebrew + other common).
     _declines = {
+        # English
         "no", "nope", "nah", "not now", "nevermind", "never mind",
         "no thanks", "no thank you", "skip", "cancel", "forget it",
         "don't", "dont", "no hint", "stop",
+        # Hebrew
+        "לא", "לא תודה", "לא רוצה", "לא צריך", "לא עכשיו", "בטל", "עצור",
+        # Other common
+        "non", "nein", "нет", "لا",
     }
     _is_decline = (
         last_user_msg in _declines
@@ -192,6 +214,7 @@ def node_generate_hint(state: HintState) -> HintState:
         or last_user_msg.startswith("dont")
         or last_user_msg.startswith("nope")
         or last_user_msg.startswith("nah ")
+        or last_user_msg.startswith("לא ")
     )
 
     _prev_was_confirmation = False
@@ -217,6 +240,10 @@ def node_generate_hint(state: HintState) -> HintState:
     )
 
     system_prompt = f"""You are a helpful coding mentor for a legacy code debugging challenge.
+
+LANGUAGE RULE (mandatory — never violate):
+The student's most recent message is written in {_user_language}.
+You MUST respond entirely in {_user_language}. Do not use any other language, even partially.
 
 CHALLENGE CONTEXT:
 - There may be multiple bugs — use the BUG REFERENCE below to know exactly what they are
@@ -262,7 +289,7 @@ HINT CONFIRMATION RULE (critical):
 - Before giving any substantive debugging hint (GAVE_HINT:YES), you MUST first ask for confirmation —
   UNLESS the most recent assistant message in the conversation (the last AI turn above) was already
   a confirmation question for THIS same request.
-- Confirmation message to use (word for word):
+- Confirmation message to use (word for word at the relevant language):
     "I can give you a hint, but keep in mind it will add −{next_penalty} pts penalty to your score
      (you've used {hints_used} hint(s) so far, {hints_remaining} remaining).
      Would you like me to proceed?"
