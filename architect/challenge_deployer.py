@@ -45,12 +45,19 @@ def deploy_challenge(state: ArchitectState) -> ArchitectState:
     for bug in all_bug_data:
         func_name = bug["function_name"]
         all_tests = bug_specific_tests.get(func_name) or []
-        mid = len(all_tests) // 2
-        public = all_tests[:mid] if mid > 0 else all_tests[:1] if all_tests else []
-        secret = all_tests[mid:] if mid > 0 else all_tests[1:] if len(all_tests) > 1 else []
+        
+        # Skip bugs with no tests (shouldn't happen, but be safe)
+        if not all_tests:
+            continue
+        
+        # All tests now detect the bug (only detecting tests are saved)
+        # Split: first 5 tests to public, rest to secret (max 5 each)
+        public = all_tests[:5] if len(all_tests) >= 5 else all_tests
+        secret = all_tests[5:10] if len(all_tests) > 5 else []
+        
         bugs_with_tests.append({
             "function_name": func_name,
-            "bug_description": bug.get("bug_description", ""),  # Changed from bug_variant
+            "bug_description": bug.get("bug_description", ""),
             "public_tests": public,
             "secret_tests": secret
         })

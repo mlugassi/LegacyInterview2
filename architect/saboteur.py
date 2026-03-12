@@ -3,6 +3,7 @@ import difflib
 import json
 import os
 import random
+import re
 import textwrap
 
 from langchain_openai import ChatOpenAI
@@ -27,11 +28,19 @@ _MAX_DEPTH_LEVEL = {1: 4, 2: 4, 3: 4}
 _TEST_GENERATION_SYSTEM_PROMPT = """
 You are an expert test creator for Python functions.
 
-Your job: Generate 6-10 diverse test cases for a given function.
+Your job: Generate EXACTLY 25 diverse test cases for a given function.
+
+*** MANDATORY: You MUST return EXACTLY 25 test cases. NOT 10, NOT 15, EXACTLY 25! ***
+
+CRITICAL: DO NOT create tests for functions that return generators or iterators!
+- If the function uses 'yield' keyword - REJECT IT (return empty test list)
+- If the function returns a generator object - REJECT IT
+- If function name ends with '_iter' or '_generator' - REJECT IT
+- Only create tests for functions that return CONCRETE VALUES (int, str, list, dict, etc.)
 
 CRITICAL RULES FOR TEST ARGUMENTS:
 1. ONLY positional arguments - NO keyword arguments, NO **kwargs
-2. NO lambda functions, NO range(), NO generators, NO iterators
+2. NO lambda functions, NO range(), NO generators, NO iterators in arguments
 3. Use only primitives: int, float, str, list, dict, bool, None
 4. Each "args" must be a STRING containing a valid Python tuple literal
 5. For functions expecting iterables: use LISTS, not range() or generators
@@ -50,14 +59,16 @@ BAD examples (NEVER DO THIS):
 - "(range(10),)"  ❌ NO range! Use "([0,1,2,3,4,5,6,7,8,9],)" instead
 - "(iter([1,2,3]),)"  ❌ NO iter()! Use "([1,2,3],)" directly
 
-Return ONLY valid JSON (no markdown):
+Return ONLY valid JSON (no markdown) with EXACTLY 25 test cases:
 {
   "test_cases": [
     {"args": "(5,)"},
     {"args": "([1,2,3], 2)"},
-    ...
+    ... (continue until you have EXACTLY 25 tests)
   ]
 }
+
+*** REMINDER: The test_cases array MUST contain EXACTLY 25 items! ***
 
 CRITICAL: The "args" value must be a STRING, not actual Python syntax!
 Use double quotes around the tuple literal string.
@@ -80,19 +91,28 @@ You will receive:
 1. A Python function (ORIGINAL, working correctly)
 2. Test cases with their CURRENT outputs on the original function
 
-Your task: Inject ONE subtle bug so that AT LEAST HALF of the tests will produce DIFFERENT outputs.
+Your task: Inject ONE simple, logical bug so that AT LEAST HALF of the tests will produce DIFFERENT outputs.
 
 CRITICAL REQUIREMENT:
 - You MUST mentally trace through EACH test case on both the original and buggy versions
-- Verify that at least 50% of tests will show DIFFERENT outputs
 - If a test shows the SAME output on both versions, the bug is TOO SUBTLE or in the WRONG place
 
-BEST BUG TYPES (choose ONE that WILL affect the test outputs you see):
-1. Off-by-one in loop: range(len(lst)) → range(len(lst)-1)
-2. Wrong operator: < → <=, + → -, and → or  
-3. Wrong variable: total += value → total += old_value
-4. Wrong initialization: count = 0 → count = 1
-5. Wrong boundary: if x > 0 → if x >= 0
+******MANDATORY*****: Verify that at least 50% of tests will show DIFFERENT outputs
+
+BEST BUG TYPES - Choose SIMPLE logical errors (choose ONE that WILL affect the test outputs you see):
+1. Off-by-one errors: range(len(lst)) → range(len(lst)-1), or i+1 → i
+2. Wrong comparison operator: < → <=, > → >=, == → !=
+3. Wrong arithmetic operator: + → -, * → /, // → /
+4. Wrong boolean operator: and → or, not → (remove not)
+5. Wrong initialization value: count = 0 → count = 1, result = [] → result = [0]
+6. Wrong variable name: use wrong variable in expression
+7. Wrong return statement: return final list with last/first element modified
+
+AVOID THESE (too complex or obscure):
+- Bitwise operations (unless the function already uses them)
+- Complex string manipulations that look intentional
+- Type conversions that seem unnatural
+- Lambda expressions or comprehensions changes (unless simple)
 
 EXAMPLE - GOOD BUG SELECTION:
 Test 1: input [1,2,3,4], output [2,3,4,5]  
@@ -102,23 +122,21 @@ Test 2: input [10,20,30], output [20,30,40]
 → Test 2 will now output [30,40,50] ✓ DIFFERENT
 
 CRITICAL RULES:
+- Choose a SIMPLE, LOGICAL error that a human might make
 - Change EXACTLY ONE thing (one operator, one number, one variable name)
 - Bug must cause WRONG OUTPUT (not crashes!)
 - Do NOT add comments
 - Do NOT rename function or parameters
-- Function must still RUN without exceptions
+- Function must still RUN without exceptions on all test inputs
 - At least HALF of the provided tests must produce DIFFERENT outputs
+- Bug should be the kind that could happen during normal coding
 
 Return ONLY valid JSON (no markdown):
 {
   "sabotaged_function_code": "<complete function def block>",
-  "bug_description": "<one sentence: what you changed and why it fails>"
+  "bug_description": "<one sentence: what you changed and why it produces wrong output>"
 }
 """
-
-_LEVEL_INSTRUCTIONS = {1: _BUG_INJECTION_SYSTEM_PROMPT,
-                       2: _BUG_INJECTION_SYSTEM_PROMPT,
-                       3: _BUG_INJECTION_SYSTEM_PROMPT}
 
 _SYSTEM_PROMPT = """
 You are the Legacy Challenge Architect. You will receive either ONE or TWO Python functions.
@@ -535,12 +553,26 @@ def _pick_surface_function(source: str, max_depth: int,
 
 def _parse_response(raw: str) -> dict:
     raw = raw.strip()
-    if raw.startswith("```"):
+    
+    # Try to extract JSON from markdown code block (even if there's text before it)
+    if "```json" in raw:
+        # Find the json code block
+        parts = raw.split("```json")
+        if len(parts) > 1:
+            # Take everything after ```json and before the next ```
+            json_part = parts[1].split("```")[0].strip()
+            return json.loads(json_part)
+    elif "```" in raw:
+        # Fallback: try any code block
         parts = raw.split("```")
-        raw = parts[1] if len(parts) > 1 else raw
-        if raw.startswith("json"):
-            raw = raw[4:]
-        raw = raw.strip()
+        if len(parts) > 1:
+            potential_json = parts[1]
+            if potential_json.lower().startswith("json"):
+                potential_json = potential_json[4:]
+            potential_json = potential_json.strip()
+            return json.loads(potential_json)
+    
+    # No markdown block, try to parse directly
     return json.loads(raw)
 
 
@@ -636,7 +668,7 @@ def _generate_tests_for_function(
     debug_mode: bool = False,
 ) -> dict | None:
     """
-    Generate 6-10 test cases for a function WITHOUT injecting any bugs.
+    Generate 25 test cases for a function WITHOUT injecting any bugs.
     Tests are created for the ORIGINAL, working function.
     Returns dict with test_cases list, or None on failure.
     """
@@ -654,9 +686,9 @@ def _generate_tests_for_function(
             f"FUNCTION TO TEST:\n```python\n{func_source}\n```"
         )
     
-    for attempt in range(1, 3):
+    for attempt in range(1, 5):  # Try up to 4 times to get 25 tests
         if debug_mode:
-            print(f"[test_gen] Generating 6-10 tests for '{func_name}' (attempt {attempt})...")
+            print(f"[test_gen] Generating 25 tests for '{func_name}' (attempt {attempt})...")
         
         try:
             response = llm.invoke([
@@ -671,14 +703,13 @@ def _generate_tests_for_function(
             
             test_cases = data.get("test_cases", [])
             
-            if len(test_cases) >= 6:
-                data["test_cases"] = test_cases[:10]  # Keep at most 10
+            if len(test_cases) >= 20:  # Accept at least 20 tests (requested 25)
                 if debug_mode:
-                    print(f"[test_gen] OK: Generated {len(data['test_cases'])} tests")
+                    print(f"[test_gen] OK: Generated {len(test_cases)} tests (requested 25)")
                 return data
             
             if debug_mode:
-                print(f"[test_gen] Not enough tests: got {len(test_cases)}, need 6+")
+                print(f"[test_gen] Too few tests: got {len(test_cases)}, need at least 20, retrying...")
         
         except json.JSONDecodeError as e:
             if debug_mode:
@@ -857,7 +888,7 @@ def _sabotage_one_helper(
 ) -> tuple[str, dict] | tuple[None, None]:
     """
     TWO-PHASE APPROACH:
-    1. Generate 6-10 tests on the WORKING code
+    1. Generate 25 tests on the WORKING code
     2. Inject bug into function (GPT sees tests and must fail at least half)
     3. Validate that bug is detectable by at least 1 test
     
@@ -866,10 +897,10 @@ def _sabotage_one_helper(
     func_source, start_line, end_line = _extract_function_source(current_source, bug_func_name)
 
     # =====================================================================
-    # PHASE 1: GENERATE 6-10 TESTS ON WORKING CODE
+    # PHASE 1: GENERATE 25 TESTS ON WORKING CODE
     # =====================================================================
     if debug_mode:
-        print(f"[saboteur] PHASE 1: Generating 6-10 tests for '{bug_func_name}'...")
+        print(f"[saboteur] PHASE 1: Generating 25 tests for '{bug_func_name}'...")
     
     test_data = _generate_tests_for_function(
         func_source=func_source,
@@ -1152,7 +1183,27 @@ def _splice_transforms_back(original: str, transformed_snippet: str, orig_chain:
         insert_block = "\n\n" + "\n\n".join(s.rstrip("\n") for s in insertions) + "\n\n"
         result.insert(adjusted, insert_block)
 
-    return "".join(result)
+    # If _state_flux is referenced anywhere, add global declaration after imports
+    final_code = "".join(result)
+    if "_state_flux" in final_code:
+        # Find the last import statement
+        try:
+            tree = ast.parse(final_code)
+            last_import_line = -1
+            for node in tree.body:
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    last_import_line = node.end_lineno - 1
+            
+            # Insert _state_flux declaration after imports
+            if last_import_line >= 0:
+                result_lines = final_code.splitlines(keepends=True)
+                # Add the global variable after the last import
+                result_lines.insert(last_import_line + 1, "\n# Global state for obfuscation\n_state_flux = None\n\n")
+                final_code = "".join(result_lines)
+        except:
+            pass  # If parsing fails, just return as-is
+    
+    return final_code
 
 
 # Horizontal & Vertical Expansion rules applied to EVERY function created or modified.
@@ -1260,14 +1311,22 @@ MANDATORY EXPANSION RULES — apply to EVERY function you write or modify:
 
 def _obfuscate_full_file(source: str, surface_func_name: str, llm, level: int = 1,
                          verified_cases: list | None = None, file_path: str | None = None,
-                         bug_func_name: str | None = None, buggy_func_source: str | None = None) -> str:
+                         bug_func_name: str | None = None, buggy_func_source: str | None = None,
+                         protected_function_names: list | None = None) -> str:
     """
     Level 1 post-pass: legacy obfuscation — cryptic names, deprecated patterns, global vars,
     mixed styling, removed comments.  When level==3, also injects red-herring decoys.
     Only the file where the bug was injected is transformed; no other files are touched.
     After transformation, verifies that surface_func_name still exists and the bug still
     manifests on at least one verified_case. Falls back to original source on any failure.
+    
+    Args:
+        protected_function_names: List of function names whose signatures must be preserved exactly
     """
+    # Ensure we have a list of protected functions
+    if protected_function_names is None:
+        protected_function_names = [surface_func_name]
+    
     # Extract only the chain functions — avoids sending the whole file to GPT
     chain = _chain_for_obfuscation(source, surface_func_name)
     mini_source, _ = _extract_chain_snippet(source, chain)
@@ -1357,7 +1416,7 @@ def _obfuscate_full_file(source: str, surface_func_name: str, llm, level: int = 
         f"{red_herring_rule}"
         f"{bug_preservation_rule}"
         f"HARD CONSTRAINTS (NEVER violate):\n"
-        f"  - Keep `{surface_func_name}` with its EXACT original name and signature.\n"
+        f"  - Keep these functions with their EXACT names and signatures (do NOT modify): {', '.join(f'`{fn}`' for fn in protected_function_names)}\n"
         f"  - Do NOT fix any bugs — all buggy behaviour MUST be preserved exactly.\n"
         f"  - The file MUST remain valid, runnable Python (no syntax errors).\n"
         f"  - Do NOT mix tabs and spaces for indentation (Python forbids it).\n"
@@ -1407,14 +1466,21 @@ def _obfuscate_full_file(source: str, surface_func_name: str, llm, level: int = 
 
 def _spaghettify_file(source: str, surface_func_name: str, llm,
                       file_path: str, verified_cases: list,
-                      bug_func_name: str | None = None, buggy_func_source: str | None = None) -> tuple[str, list]:
+                      bug_func_name: str | None = None, buggy_func_source: str | None = None,
+                      protected_function_names: list | None = None) -> tuple[str, list]:
     """
     Level 2 post-pass: Black Box Wrapping — buries the core logic of every function
     inside 4-5 layers of complex wrapper functions filled with conditional mazes,
     obfuscated data passing, and busy-work logic. Only the target file is transformed.
     Returns (new_source, re_verified_cases). Falls back to (source, verified_cases) if the
     transformation breaks syntax or removes the bug from all test cases.
+    
+    Args:
+        protected_function_names: List of function names whose signatures must be preserved exactly
     """
+    # Ensure we have a list of protected functions
+    if protected_function_names is None:
+        protected_function_names = [surface_func_name]
     # Extract only the chain functions — avoids sending the whole file to GPT
     chain = _chain_for_obfuscation(source, surface_func_name)
     mini_source, _ = _extract_chain_snippet(source, chain)
@@ -1484,8 +1550,8 @@ def _spaghettify_file(source: str, surface_func_name: str, llm,
         f"    It must be invisible at first glance.\n\n"
         f"{bug_preservation_rule}"
         f"HARD CONSTRAINTS (NEVER violate):\n"
-        f"  - Keep ALL original function names exactly and their signatures unchanged.\n"
-        f"  - Do NOT fix any bugs — the buggy behaviour of `{surface_func_name}` MUST be preserved.\n"
+        f"  - Keep these functions with their EXACT names and signatures (do NOT modify): {', '.join(f'`{fn}`' for fn in protected_function_names)}\n"
+        f"  - Do NOT fix any bugs — the buggy behaviour MUST be preserved.\n"
         f"  - The file MUST remain valid, runnable Python (no syntax errors).\n"
         f"  - All helper functions must contain REAL code, NOT bare `pass` statements.\n"
         f"  - Keep all module-level import statements unchanged.\n"
@@ -1658,17 +1724,18 @@ def {func_name}({param_str}):
     return updated_source, augmented
 
 
-def _pick_simple_functions(source: str, n_funcs: int, exclude: set[str] | None = None) -> list[str]:
+def _pick_simple_functions(source: str, n_funcs: int, llm, exclude: set[str] | None = None) -> list[str]:
     """
     Pick n_funcs SIMPLE functions (standalone, doesn't matter if they call others).
     These are depth-1 functions where we'll inject bugs directly.
+    Uses GPT to intelligently select functions best suited for bug injection.
     Returns list of function names, or empty list if not enough functions found.
     """
     exclude = exclude or set()
     tree = ast.parse(source)
     
-    # Score all suitable functions
-    scored: list[tuple[int, str]] = []
+    # Step 1: Gather candidate functions (basic filtering)
+    candidates: list[tuple[str, str]] = []  # (func_name, func_code)
     
     for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -1682,38 +1749,113 @@ def _pick_simple_functions(source: str, n_funcs: int, exclude: set[str] | None =
         if node.end_lineno - node.lineno < 5:  # At least 5 lines
             continue
         
+        # SKIP GENERATOR FUNCTIONS - they can't be tested properly
+        if node.name.endswith("_iter") or node.name.endswith("_generator"):
+            continue
+        
+        # Check if function contains yield (makes it a generator)
+        has_yield = any(isinstance(child, (ast.Yield, ast.YieldFrom)) for child in ast.walk(node))
+        if has_yield:
+            continue
+        
+        # Extract function code
+        source_lines = source.splitlines()
+        func_code = "\n".join(source_lines[node.lineno-1:node.end_lineno])
+        candidates.append((node.name, func_code))
+    
+    if len(candidates) < n_funcs:
+        return []  # Not enough functions
+    
+    # Step 2: Use GPT to select best functions for bug injection
+    print(f"[picker] Found {len(candidates)} candidate functions, asking GPT to select best {n_funcs}...")
+    
+    try:
+        # Build prompt with function previews
+        func_list = []
+        for idx, (name, code) in enumerate(candidates[:30], 1):  # Limit to 30 to fit in prompt
+            preview = code[:400] + ("..." if len(code) > 400 else "")
+            func_list.append(f"{idx}. {name}\n```python\n{preview}\n```")
+        
+        prompt = f"""You are an expert code analyst selecting functions for bug injection in a coding challenge.
+
+TASK: Select the {n_funcs} BEST functions from the candidates below for injecting subtle logical bugs.
+
+SELECTION CRITERIA (in priority order):
+1. TESTABILITY: Functions with clear inputs/outputs and deterministic behavior
+2. COMPLEXITY: Functions with logic (conditionals, loops, calculations) where bugs can hide
+3. STANDALONE: Functions that can be tested independently (avoid heavy dependencies)
+4. LENGTH: Medium-length functions (10-30 lines) are ideal - not too trivial, not too complex
+5. AVOID: Simple getters/setters, trivial wrappers, or functions with external I/O
+
+CANDIDATE FUNCTIONS:
+{chr(10).join(func_list)}
+
+OUTPUT FORMAT (JSON only, no explanation):
+{{
+    "selected_functions": ["function_name_1", "function_name_2", ...]
+}}
+
+Return EXACTLY {n_funcs} function names. Choose functions that would make good challenge candidates."""
+
+        response = llm.invoke([HumanMessage(content=prompt)])
+        response_text = response.content
+        
+        # Parse GPT response
+        match = re.search(r'\{.*"selected_functions".*\}', response_text, re.DOTALL)
+        if match:
+            data = json.loads(match.group(0))
+            selected = data.get("selected_functions", [])
+            
+            # Validate selections
+            valid_names = {name for name, _ in candidates}
+            selected = [name for name in selected if name in valid_names]
+            
+            if len(selected) >= n_funcs:
+                print(f"[picker] GPT selected: {selected[:n_funcs]}")
+                return selected[:n_funcs]
+            else:
+                print(f"[picker] GPT returned only {len(selected)} valid functions, falling back to AST scoring...")
+    
+    except Exception as e:
+        print(f"[picker] GPT selection failed: {e}, falling back to AST scoring...")
+    
+    # Step 3: Fallback to rule-based scoring if GPT fails
+    print("[picker] Using fallback AST-based complexity scoring...")
+    scored: list[tuple[int, str]] = []
+    
+    for name, code in candidates:
         # Score based on complexity
         score = 0
-        for child in ast.walk(node):
-            if isinstance(child, ast.Constant) and isinstance(child.value, (int, float, str)):
-                score += 2
-            if isinstance(child, (ast.For, ast.While)):
-                score += 3
-            if isinstance(child, ast.If):
-                score += 2
-            if isinstance(child, ast.Return):
-                score += 2
-            if isinstance(child, ast.BinOp):
-                score += 2
-            if isinstance(child, ast.ListComp):
-                score += 3
-            if isinstance(child, ast.Compare):
-                score += 1
-            if isinstance(child, ast.Attribute):
-                score -= 1  # Discourage class methods
+        try:
+            func_tree = ast.parse(code)
+            for child in ast.walk(func_tree):
+                if isinstance(child, ast.Constant) and isinstance(child.value, (int, float, str)):
+                    score += 2
+                if isinstance(child, (ast.For, ast.While)):
+                    score += 3
+                if isinstance(child, ast.If):
+                    score += 2
+                if isinstance(child, ast.Return):
+                    score += 2
+                if isinstance(child, ast.BinOp):
+                    score += 2
+                if isinstance(child, ast.ListComp):
+                    score += 3
+                if isinstance(child, ast.Compare):
+                    score += 1
+                if isinstance(child, ast.Attribute):
+                    score -= 1  # Discourage class methods
+        except:
+            score = 0
         
         if score > 0:
-            scored.append((score, node.name))
-    
-    if len(scored) < n_funcs:
-        return []  # Not enough functions
+            scored.append((score, name))
     
     # Sort by score and take top candidates
     scored.sort(key=lambda x: x[0], reverse=True)
-    # Take diverse candidates (not just top 3)
-    candidates = scored[:min(n_funcs * 3, len(scored))]
-    random.shuffle(candidates)
-    return [name for _, name in candidates[:n_funcs]]
+    top_candidates = scored[:min(n_funcs * 3, len(scored))]
+    random.shuffle(top_candidates)
+    return [name for _, name in top_candidates[:n_funcs]]
 
 
 def saboteur_init(state: ArchitectState) -> ArchitectState:
@@ -1766,7 +1908,7 @@ def saboteur_init(state: ArchitectState) -> ArchitectState:
         remaining_bugs = n_bugs - len(all_bugs_data)
         
         # Pick candidate functions (we may not succeed with all)
-        candidate_funcs = _pick_simple_functions(source, remaining_bugs * 3)
+        candidate_funcs = _pick_simple_functions(source, remaining_bugs * 3, llm)
         
         if not candidate_funcs:
             if debug_mode:
@@ -1819,14 +1961,6 @@ def saboteur_init(state: ArchitectState) -> ArchitectState:
             for tc in test_cases:
                 args = tc.get("args", "()")
                 
-                # Skip invalid tests
-                if "lambda" in args or "range(" in args:
-                    continue
-                try:
-                    eval(args, {"__builtins__": {}})
-                except:
-                    continue
-                
                 # Run on BEFORE and AFTER
                 before_ok, before_result = _try_exec(source_before_bug, func_name, args, current_file)
                 after_ok, after_result = _try_exec(new_source, func_name, args, current_file)
@@ -1843,38 +1977,34 @@ def saboteur_init(state: ArchitectState) -> ArchitectState:
             if debug_mode:
                 print(f"[saboteur_init] Bug in '{func_name}': {num_detecting}/{len(test_cases)} tests detect it")
             
-            # Validate: need at least 1 detecting test (changed from 3)
-            if num_detecting < 1:
+            # Validate: need at least 6 detecting tests (to have enough for 5 public + at least 1 secret)
+            if num_detecting < 6:
                 if debug_mode:
-                    print(f"[saboteur_init] No tests detect this bug, skipping")
+                    print(f"[saboteur_init] Only {num_detecting} tests detect this bug, need at least 6, skipping")
                 continue
             
-            # Bug is good! Save ALL test cases (not just detecting ones)
+            # Bug is good! Save ONLY DETECTING test cases (tests that fail with the bug)
             current_source = new_source
             
             # Add function_name to bug data
             data["function_name"] = func_name
+            data["num_detecting_tests"] = num_detecting  # Store count of detecting tests
             all_bugs_data.append(data)
             
-            # Store ALL test cases (both detecting and passing)
-            # This gives students a mix of passing/failing tests
+            # Store ONLY test cases that DETECT the bug (fail with buggy code)
             all_tests_with_expected = []
-            for tc in test_cases:
+            for tc in detecting_tests:
                 args = tc.get("args", "()")
-                # Skip invalid tests
-                if "lambda" in args or "range(" in args:
-                    continue
-                try:
-                    eval(args, {"__builtins__": {}})
-                except:
-                    continue
+                
                 # Get expected result from original (non-buggy) code
                 before_ok, before_result = _try_exec(source_before_bug, func_name, args, current_file)
                 if before_ok:
-                    all_tests_with_expected.append({
+                    test_entry = {
                         "args": args,
-                        "expected": before_result
-                    })
+                        "expected": before_result,
+                        "detects_bug": True  # All saved tests detect the bug
+                    }
+                    all_tests_with_expected.append(test_entry)
             
             bug_specific_tests[func_name] = all_tests_with_expected
             successful_funcs.append(func_name)
@@ -1885,7 +2015,7 @@ def saboteur_init(state: ArchitectState) -> ArchitectState:
                 target_file_path = current_file
             
             if debug_mode:
-                print(f"[saboteur_init] ✓ Bug #{bug_index} injected - {len(all_tests_with_expected)} total tests ({num_detecting} detecting)")
+                print(f"[saboteur_init] OK Bug #{bug_index} injected - {len(all_tests_with_expected)} total tests ({num_detecting} detecting)")
     
     # Check if we got enough bugs across all files
     if len(all_bugs_data) < n_bugs:
@@ -1950,6 +2080,200 @@ def saboteur_init(state: ArchitectState) -> ArchitectState:
     return state
 
 
+def _generate_wrapper_template(
+    wrapper_name: str,
+    args_list: list,
+    args_str: str,
+    decoy_functions: list,
+    next_call: str,
+    template_style: int,
+    misleading_comments: list,
+    has_bug: bool,
+    bug_marker: str
+) -> str:
+    """Generate a wrapper function with one of 5 different template styles.
+    
+    Each wrapper calls at least 3 different functions and may have misleading comments.
+    If has_bug is True, inject a subtle bug in the wrapper logic.
+    """
+    # Ensure we have at least 3 decoy functions
+    if len(decoy_functions) < 3:
+        decoy_functions = decoy_functions + ['str', 'len', 'abs', 'min', 'max'][:3 - len(decoy_functions)]
+    
+    # Select misleading comments for this wrapper
+    selected_comments = random.sample(misleading_comments, min(3, len(misleading_comments)))
+    
+    if template_style == 1:
+        # Style 1: Validation chain with multiple function calls
+        return f"""def {wrapper_name}({", ".join(args_list)}):
+    \"\"\"Validates and processes input data with integrity checks.\"\"\"{bug_marker}
+    {selected_comments[0]}
+    # Pre-processing validation
+    try:
+        _validation_a = {decoy_functions[0]}({args_list[0] if args_list else "''"})
+    except:
+        _validation_a = None
+    
+    {selected_comments[1] if len(selected_comments) > 1 else '# Perform format check'}
+    try:
+        _validation_b = {decoy_functions[1]}({args_list[0] if args_list else "''"})
+    except:
+        _validation_b = None
+    
+    # Core processing with validation
+    try:
+        _validation_c = {decoy_functions[2]}({args_list[0] if args_list else "''"})
+    except:
+        pass
+    
+    {selected_comments[2] if len(selected_comments) > 2 else '# Execute main operation'}
+    if _validation_a is not None {'and False' if has_bug else 'or True'}:  # {'BUG: Added "and False" condition' if has_bug else 'Always true'}
+        return {next_call}
+    
+    # Should never get here
+    return {next_call}
+"""
+    
+    elif template_style == 2:
+        # Style 2: Try-except blocks with multiple helpers
+        return f"""def {wrapper_name}({", ".join(args_list)}):
+    \"\"\"Helper function with error handling and retries.\"\"\"{bug_marker}
+    _retry_count = 0
+    _max_retries = 3
+    
+    {selected_comments[0]}
+    # Initialize helper functions
+    try:
+        _ = {decoy_functions[0]}('')
+        _retry_count += 1
+    except:
+        pass  # Helper initialization failed
+    
+    {selected_comments[1] if len(selected_comments) > 1 else '# Check prerequisites'}
+    try:
+        _check = {decoy_functions[1]}({args_list[0] if args_list else "''"})
+        _retry_count {'= 999' if has_bug else '+= 1'}  # {'BUG: Set to 999 instead of increment' if has_bug else 'Increment counter'}
+    except:
+        _check = True
+    
+    {selected_comments[2] if len(selected_comments) > 2 else '# Perform validation'}
+    try:
+        _validation = {decoy_functions[2]}({args_list[0] if args_list else "''"})
+    except:
+        _validation = None
+    
+    # Execute main operation
+    if _retry_count < _max_retries or True:  # Always succeeds
+        return {next_call}
+    
+    return {next_call}
+"""
+    
+    elif template_style == 3:
+        # Style 3: Conditional branching with function calls
+        cryptic = random.sample(['_tmp', '_val', '_state', '_flag', '_check', '_data'], 4)
+        return f"""def {wrapper_name}({", ".join(args_list)}):
+    \"\"\"Processes data with conditional validation paths.\"\"\"{bug_marker}
+    {cryptic[0]} = None
+    {cryptic[1]} = False
+    
+    {selected_comments[0]}
+    # Validate input format
+    try:
+        {cryptic[0]} = {decoy_functions[0]}({args_list[0] if args_list else "''"})
+        {cryptic[1]} = True
+    except:
+        {cryptic[1]} = False
+    
+    {selected_comments[1] if len(selected_comments) > 1 else '# Check boundaries'}
+    if {cryptic[1]} {'and False' if has_bug else 'or True'}:  # {'BUG: Added false condition' if has_bug else 'Branch selection'}
+        try:
+            {cryptic[2]} = {decoy_functions[1]}({args_list[0] if args_list else "''"})
+        except:
+            pass
+        
+        {selected_comments[2] if len(selected_comments) > 2 else '# Process through validator'}
+        try:
+            {cryptic[3]} = {decoy_functions[2]}({args_list[0] if args_list else "''"})
+        except:
+            {cryptic[3]} = None
+        
+        return {next_call}
+    else:
+        # Fallback path (never reached)
+        return {next_call}
+"""
+    
+    elif template_style == 4:
+        # Style 4: Loop/iteration style with validators
+        return f"""def {wrapper_name}({", ".join(args_list)}):
+    \"\"\"Iteratively validates and transforms input data.\"\"\"{bug_marker}
+    _validators = []
+    
+    {selected_comments[0]}
+    # Build validation pipeline
+    for _iter in range(3):
+        try:
+            if _iter == 0:
+                _check = {decoy_functions[0]}({args_list[0] if args_list else "''"})
+            elif _iter == 1:
+                {selected_comments[1] if len(selected_comments) > 1 else '# Apply transformation'}
+                _check = {decoy_functions[1]}({args_list[0] if args_list else "''"})
+            else:
+                _check = {decoy_functions[2]}({args_list[0] if args_list else "''"})
+            _validators.append(_check)
+        except:
+            _validators.append(None)
+    
+    {selected_comments[2] if len(selected_comments) > 2 else '# Execute validated operation'}
+    # Check if all validators passed
+    if len(_validators) {'!=' if has_bug else '>='} 0:  # {'BUG: Changed >= to !=' if has_bug else 'Should always be true'}
+        return {next_call}
+    
+    return {next_call}
+"""
+    
+    else:  # template_style == 5
+        # Style 5: Computation/cache style with helpers
+        vars_pool = ['_cache', '_buffer', '_state', '_context', '_result', '_temp']
+        v = random.sample(vars_pool, 4)
+        return f"""def {wrapper_name}({", ".join(args_list)}):
+    \"\"\"Caches and optimizes repeated operations for performance.\"\"\"{bug_marker}
+    global _cache_hits
+    {v[0]} = {{}}
+    {v[1]} = []
+    
+    {selected_comments[0]}
+    # Check cache
+    try:
+        {v[2]} = {decoy_functions[0]}({args_list[0] if args_list else "''"})
+        if {v[2]} is not None:
+            {v[1]}.append({v[2]})
+    except:
+        {v[2]} = None
+    
+    {selected_comments[1] if len(selected_comments) > 1 else '# Update cache state'}
+    try:
+        {v[3]} = {decoy_functions[1]}({args_list[0] if args_list else "''"})
+        {v[0]}['key'] = {v[3]}
+    except:
+        pass
+    
+    {selected_comments[2] if len(selected_comments) > 2 else '# Compute result'}
+    # Verification check
+    try:
+        _ = {decoy_functions[2]}({args_list[0] if args_list else "''"})
+    except:
+        pass
+    
+    # Return computed result
+    if {'False or ' if has_bug else ''}len({v[1]}) >= 0:  # {'BUG: Added "False or" shortcut' if has_bug else 'Process data'}
+        return {next_call}
+    
+    return {next_call}
+"""
+
+
 def inflate_hierarchy(state: ArchitectState) -> ArchitectState:
     """Phase 2 - Hierarchy Inflation: Add wrapper layers around buggy functions.
 
@@ -1984,6 +2308,17 @@ def inflate_hierarchy(state: ArchitectState) -> ArchitectState:
                     'analyzer', 'builder', 'manager', 'controller', 'helper',
                     'utility', 'filter', 'mapper', 'wrapper']
         
+        # Extract all available functions from the file for decoy calls
+        all_file_functions = []
+        try:
+            file_tree = ast.parse(current_source)
+            for node in ast.walk(file_tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if not node.name.startswith('_'):  # Skip private functions
+                        all_file_functions.append(node.name)
+        except:
+            pass
+        
         for func_name in sabotaged_functions:
             if debug_mode:
                 print(f"[inflate_hierarchy] Creating wrappers for '{func_name}'...")
@@ -2013,8 +2348,38 @@ def inflate_hierarchy(state: ArchitectState) -> ArchitectState:
                             used_names.add(name)
                             break
                 
+                # Select at least 5 random decoy functions from the file to call (need 3+ per wrapper)
+                decoy_functions = []
+                if all_file_functions:
+                    available_decoys = [f for f in all_file_functions if f != func_name and f not in wrapper_names]
+                    num_decoys = min(random.randint(6, 10), len(available_decoys))
+                    if available_decoys:
+                        decoy_functions = random.sample(available_decoys, num_decoys)
+                
+                # Misleading comments pool
+                misleading_comments = [
+                    "# TODO: Fix the off-by-one error here",
+                    "# BUG: This might return wrong values for edge cases",
+                    "# FIXME: Validate input before processing",
+                    "# NOTE: Check if this handles empty inputs correctly",
+                    "# WARNING: Potential infinite loop detected",
+                    "# This validates the checksum",
+                    "# This normalizes the input format",
+                    "# This performs boundary checks",
+                    "# This caches intermediate results for performance",
+                    "# This handles legacy format compatibility",
+                    "# HACK: Remove this workaround once upstream is fixed",
+                    "# TODO: Refactor this mess",
+                    "# This computes the hash for validation",
+                    "# Critical: Don't modify this logic",
+                ]
+                
                 # wrapper_names[0] is outermost, wrapper_names[-1] is innermost
                 wrappers = []
+                
+                # 20% chance to inject a bug in one of the wrappers (not the original)
+                inject_wrapper_bug = random.random() < 0.2
+                bug_wrapper_idx = random.randint(0, nesting_level - 1) if inject_wrapper_bug else -1
                 
                 # Create wrapper chain: wrappers[0] -> wrappers[1] -> ... -> original_func
                 for level in range(nesting_level):
@@ -2028,30 +2393,23 @@ def inflate_hierarchy(state: ArchitectState) -> ArchitectState:
                         next_wrapper = wrapper_names[level + 1]
                         next_call = f"{next_wrapper}({args_str})"
                     
-                    # Build wrapper function with padding
-                    wrapper_code = f"""def {wrapper_name}({", ".join(args_list)}):
-    \"\"\"Helper function for data processing.\"\"\"
-    # Initialize state
-    _state_marker = True
-    _buffer_size = 0
-    
-    # Validate inputs
-    if _state_marker:
-        _tmp_counter = 0
-        for _i in range(1):
-            _tmp_counter += 0
-        
-        # Process
-        if _buffer_size >= 0:
-            _result = {next_call}
-            
-            # Cleanup
-            _final = _result
-            return _final
-    
-    # Fallback
-    return {next_call}
-"""
+                    # Select 3-4 decoy functions for THIS wrapper (minimum 3)
+                    wrapper_decoys = []
+                    if decoy_functions:
+                        num_wrapper_decoys = min(random.randint(3, 4), len(decoy_functions))
+                        wrapper_decoys = random.sample(decoy_functions, num_wrapper_decoys)
+                    
+                    # Choose wrapper template style (5 different templates)
+                    template_style = random.randint(1, 5)
+                    
+                    # Decide if THIS wrapper gets a bug
+                    has_bug = (level == bug_wrapper_idx)
+                    bug_marker = " # BUG INJECTED IN WRAPPER" if has_bug else ""
+                    
+                    wrapper_code = _generate_wrapper_template(
+                        wrapper_name, args_list, args_str, wrapper_decoys, 
+                        next_call, template_style, misleading_comments, has_bug, bug_marker
+                    )
                     wrappers.append(wrapper_code)
                 
                 # Store mapping from original function to outermost wrapper
@@ -2274,48 +2632,179 @@ def inflate_hierarchy(state: ArchitectState) -> ArchitectState:
     return state
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# LEGACY REFACTORING: Cryptic names + legacy comments
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _apply_legacy_refactoring(source: str, tree: ast.Module) -> str:
+    """
+    Apply legacy-style refactoring to make code harder to read:
+    1. Add legacy-style comments that don't help
+    2. Apply to ALL functions in the file
+    
+    NOTE: Variable renaming is DISABLED - too risky, can break code
+    """
+    
+    # Legacy-style comments (NOT related to actual code)
+    LEGACY_COMMENTS = [
+        "# TODO: refactor this later",
+        "# FIXME: deprecated, use new API",
+        "# NOTE: legacy code, don't touch",
+        "# HACK: workaround for old bug",
+        "# XXX: needs optimization",
+        "# DEPRECATED: will be removed in v3.0",
+        "# TODO: clean up this mess",
+        "# NOTE: copied from old codebase",
+        "# FIXME: magic numbers",
+        "# HACK: temporary solution",
+        "# XXX: code smell",
+        "# TODO: add proper error handling",
+        "# NOTE: don't ask why this works",
+        "# FIXME: technical debt",
+    ]
+    
+    lines = source.splitlines(keepends=True)
+    insertions = []  # (line_idx, indent, comment)
+    
+    # Process each function
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        
+        # Skip special methods
+        if node.name.startswith('__'):
+            continue
+        
+        func_start = node.lineno - 1
+        
+        # Add legacy comment above function (30% chance)
+        if random.random() < 0.30 and func_start < len(lines):
+            comment = random.choice(LEGACY_COMMENTS)
+            indent = len(lines[func_start]) - len(lines[func_start].lstrip())
+            insertions.append((func_start, indent, comment))
+    
+    # Apply insertions in reverse order (to maintain line indices)
+    for line_idx, indent, comment in sorted(insertions, reverse=True):
+        lines.insert(line_idx, ' ' * indent + comment + '\n')
+    
+    return ''.join(lines)
+
+
+def _add_legacy_patterns(source: str, tree: ast.Module) -> str:
+    """
+    Add safe legacy code patterns:
+    1. Legacy comments (safe - no code impact)
+    2. Minimal dead code snippets (safe - just comments)
+    
+    NOTE: Redundant checks DISABLED - can cause indentation issues
+    """
+    
+    LEGACY_COMMENTS = [
+        "# Legacy compatibility layer",
+        "# Reserved for future use",
+        "# Deprecated code path",
+    ]
+    
+    lines = source.splitlines(keepends=True)
+    insertions = []  # (line_idx, indent, content)
+    
+    # Process each function
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        
+        # Skip special methods and very short functions
+        if node.name.startswith('__'):
+            continue
+        
+        func_start = node.lineno - 1
+        func_end = node.end_lineno if node.end_lineno else func_start + 1
+        
+        # Add simple comment at start of function (15% chance)
+        if random.random() < 0.15 and func_start < len(lines):
+            insert_pos = func_start + 1
+            
+            # Skip docstring if present (look at next line after def)
+            if insert_pos < len(lines):
+                stripped = lines[insert_pos].strip()
+                if stripped.startswith('"""') or stripped.startswith("'''"):
+                    # Find end of docstring
+                    quote = '"""' if stripped.startswith('"""') else "'''"
+                    if not stripped.endswith(quote) or len(stripped) <= 6:
+                        insert_pos += 1
+                        while insert_pos < len(lines) and not lines[insert_pos].strip().endswith(quote):
+                            insert_pos += 1
+                        insert_pos += 1
+            
+            if insert_pos < len(lines) and insert_pos < func_end:
+                indent = len(lines[insert_pos]) - len(lines[insert_pos].lstrip()) if insert_pos < len(lines) else 4
+                comment = random.choice(LEGACY_COMMENTS)
+                insertions.append((insert_pos, indent, comment))
+    
+    # Apply insertions in reverse order (to maintain line indices)
+    for line_idx, indent, content in sorted(insertions, reverse=True):
+        lines.insert(line_idx, ' ' * indent + content + '\n')
+    
+    return ''.join(lines)
+
+
 def apply_obfuscation_level_2(state: ArchitectState) -> ArchitectState:
-    """Phase 3 - Deep Nesting: spaghettification with readable names."""
+    """Phase 3 - Additional Legacy Patterns: dead code + redundant checks."""
     if not state.get("refactoring_enabled", False):
         print("[obfuscation_level_2] Refactoring disabled -- skipping")
         return state
 
-    print("[obfuscation_level_2] Applying spaghettification (deep nesting, readable names)...")
-    llm = ChatOpenAI(model="gpt-4o", temperature=0.7)
-    result, new_verified = _spaghettify_file(
-        state["sabotaged_code"],
-        state["function_name"],
-        llm,
-        file_path=state["target_file"],
-        verified_cases=state["test_cases"],
-        bug_func_name=state.get("bug_func_name") or None,
-        buggy_func_source=state.get("bug_func_source") or None,
-    )
-    state["sabotaged_code"] = result
-    state["test_cases"]     = new_verified
+    print("[obfuscation_level_2] Adding legacy patterns...")
+    source = state["sabotaged_code"]
+    file_path = state["target_file"]
+    
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as e:
+        print(f"[obfuscation_level_2] Syntax error, skipping: {e}")
+        return state
+    
+    # Apply legacy patterns to functions
+    transformed_source = _add_legacy_patterns(source, tree)
+    
+    # Verify the code still works
+    try:
+        compile(transformed_source, file_path or "<string>", "exec")
+        state["sabotaged_code"] = transformed_source
+        print("[obfuscation_level_2] Legacy patterns added successfully")
+    except SyntaxError as e:
+        print(f"[obfuscation_level_2] Transformed code has syntax error, keeping original: {e}")
+    
     return state
 
 
 def apply_obfuscation_level_1(state: ArchitectState) -> ArchitectState:
-    """Phase 4 - Semantic Stripping: cryptic naming + shadow wrappers."""
+    """Phase 4 - Legacy Refactoring: cryptic variable names + legacy comments."""
     if not state.get("refactoring_enabled", False):
         print("[obfuscation_level_1] Refactoring disabled -- skipping")
         return state
 
-    print("[obfuscation_level_1] Applying full-file obfuscation (cryptic names, shadow wrappers)...")
-    llm = ChatOpenAI(model="gpt-4o", temperature=0.7)
-    # Always use level=3 for maximum obfuscation when refactoring is enabled
-    result = _obfuscate_full_file(
-        state["sabotaged_code"],
-        state["function_name"],
-        llm,
-        level=3,  # Maximum obfuscation
-        verified_cases=state["test_cases"],
-        file_path=state["target_file"],
-        bug_func_name=state.get("bug_func_name") or None,
-        buggy_func_source=state.get("bug_func_source") or None,
-    )
-    state["sabotaged_code"] = result
+    print("[obfuscation_level_1] Applying legacy-style refactoring...")
+    source = state["sabotaged_code"]
+    file_path = state["target_file"]
+    
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as e:
+        print(f"[obfuscation_level_1] Syntax error, skipping: {e}")
+        return state
+    
+    # Apply legacy refactoring to ALL functions in the file
+    transformed_source = _apply_legacy_refactoring(source, tree)
+    
+    # Verify the code still works
+    try:
+        compile(transformed_source, file_path or "<string>", "exec")
+        state["sabotaged_code"] = transformed_source
+        print("[obfuscation_level_1] Legacy refactoring applied successfully")
+    except SyntaxError as e:
+        print(f"[obfuscation_level_1] Refactored code has syntax error, keeping original: {e}")
+    
     return state
 
 
@@ -2341,7 +2830,7 @@ def verify_sabotage(state: ArchitectState) -> ArchitectState:
         for tc in tests:
             ok, act = _try_exec(source, func_name, tc["args"], file_path=file_path)
             if not ok:
-                print(f"[verify_sabotage] ✗ {func_name}{tc['args']} crashed: {act}")  # act contains error if ok=False
+                print(f"[verify_sabotage] X {func_name}{tc['args']} crashed: {act}")  # act contains error if ok=False
                 continue
             new_verified.append(tc)
             if first_fail_args is None and act != tc["expected"]:
@@ -2350,9 +2839,9 @@ def verify_sabotage(state: ArchitectState) -> ArchitectState:
         
         if new_verified:
             new_bug_tests[func_name] = new_verified
-            print(f"[verify_sabotage] ✓ {func_name}: {len(new_verified)}/{len(tests)} tests survived")
+            print(f"[verify_sabotage] OK {func_name}: {len(new_verified)}/{len(tests)} tests survived")
         else:
-            print(f"[verify_sabotage] ✗ {func_name}: ALL {len(tests)} tests crashed!")
+            print(f"[verify_sabotage] X {func_name}: ALL {len(tests)} tests crashed!")
     
     if not new_bug_tests:
         raise RuntimeError(

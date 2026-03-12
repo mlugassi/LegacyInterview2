@@ -201,8 +201,7 @@ def _score_file(path: str, target_nesting: int) -> Tuple[int, int]:
 def map_files(state: ArchitectState) -> ArchitectState:
     clone_path = state["clone_path"]
     target_nesting = state["nesting_level"]
-    scored: list[tuple[int, int, str]] = []  # (score, max_depth, path)
-    fallback: list[tuple[int, int, str]] = []
+    suitable_files: list[tuple[int, int, str]] = []  # (func_count, line_count, path)
 
     for root, dirs, files in os.walk(clone_path):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
@@ -212,52 +211,34 @@ def map_files(state: ArchitectState) -> ArchitectState:
             if fname.startswith("test_") or fname.endswith("_test.py"):
                 continue
             full = os.path.join(root, fname)
-            s, max_depth = _score_file(full, target_nesting)
-            if s > 0:
-                scored.append((s, max_depth, full))
-            elif s > -999:  # parseable but penalised — keep as fallback
-                fallback.append((s, max_depth, full))
+            
+            # Count functions and lines in file
+            try:
+                with open(full, encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                tree = ast.parse(content)
+                func_count = sum(1 for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                                 and not n.name.startswith("_") and not n.name.startswith("test"))
+                line_count = len(content.splitlines())
+                
+                # Only keep files with enough functions (at least 5 for multi-bug support)
+                if func_count >= 5:
+                    suitable_files.append((func_count, line_count, full))
+            except:
+                continue  # Skip files that can't be parsed
 
-    # If no file scored positively, use the best-scoring fallback candidates
-    if not scored:
-        if not fallback:
-            raise RuntimeError("No suitable Python file found in repository.")
-        print("[mapper] No files scored > 0; using best-available fallback candidates.")
-        scored = fallback
+    if not suitable_files:
+        raise RuntimeError("No suitable Python files found with enough functions in repository.")
 
-    # Sort descending by score, take top N, then pick one with preference for matching depth
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top_n = scored[:_TOP_N_FILES]
+    # WEIGHTED RANDOM selection: longer files (more lines + more functions) have higher probability
+    # Weight = func_count * line_count (favors large, complex files)
+    weights = [func_count * (line_count / 100) for func_count, line_count, _ in suitable_files]
+    chosen_func_count, chosen_line_count, chosen_path = random.choices(suitable_files, weights=weights, k=1)[0]
     
-    # Weighted selection: prefer files with max_depth >= target_nesting
-    weights = []
-    for score, max_depth, path in top_n:
-        if max_depth >= target_nesting:
-            weight = score * 3  # Strong preference for sufficient depth
-        elif max_depth >= target_nesting - 1:
-            weight = score * 1.5  # Moderate preference for close depth
-        else:
-            weight = score * 0.5  # Lower weight for shallow files
-        weights.append(weight)
-    
-    # Weighted random choice
-    total_weight = sum(weights)
-    if total_weight > 0:
-        r = random.uniform(0, total_weight)
-        cumulative = 0
-        chosen_idx = 0
-        for idx, w in enumerate(weights):
-            cumulative += w
-            if r <= cumulative:
-                chosen_idx = idx
-                break
-        chosen_score, chosen_depth, chosen_path = top_n[chosen_idx]
-    else:
-        chosen_score, chosen_depth, chosen_path = top_n[0]
-
-    # Build ordered fallback list: chosen first, then remaining candidates by score
-    all_sorted_paths = [p for _, _, p in scored]
-    remaining = [p for p in all_sorted_paths if p != chosen_path]
+    # Build candidate files list for fallback (sorted by function count and line count)
+    suitable_files.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    all_paths = [p for _, _, p in suitable_files]
+    remaining = [p for p in all_paths if p != chosen_path]
     candidate_files = [chosen_path] + remaining
 
     with open(chosen_path, encoding="utf-8", errors="ignore") as f:
@@ -265,9 +246,9 @@ def map_files(state: ArchitectState) -> ArchitectState:
 
     debug_mode = state.get("debug_mode", False)
     if debug_mode:
-        print(f"[mapper] Target nesting level: {target_nesting}")
-        print(f"[mapper] Top candidates: {[(os.path.basename(p), d) for _, d, p in top_n]}")
-        print(f"[mapper] Randomly selected: {chosen_path} (score={chosen_score}, max_depth={chosen_depth})")
+        print(f"[mapper] Found {len(suitable_files)} suitable files (5+ functions each)")
+        print(f"[mapper] WEIGHTED selection (longer files preferred): {chosen_path}")
+        print(f"[mapper] Selected file: {chosen_func_count} functions, {chosen_line_count} lines")
         print(f"[mapper] {len(candidate_files)} total candidates available as fallback")
     
     state["target_file"] = chosen_path
