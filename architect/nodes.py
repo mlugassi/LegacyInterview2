@@ -4,7 +4,7 @@ from architect.state import ArchitectState
 from architect.repo_cloner import clone_repo
 from architect.file_mapper import map_files
 from architect.saboteur import (
-    sabotage_init,
+    saboteur_init,
     inflate_hierarchy,
     apply_obfuscation_level_1,
     apply_obfuscation_level_2,
@@ -25,7 +25,7 @@ def node_map_files(state: ArchitectState) -> ArchitectState:
 
 def node_sabotage_init(state: ArchitectState) -> ArchitectState:
     """Target Selection: pick the function and inject the AI-resistant bug."""
-    return sabotage_init(state)
+    return saboteur_init(state)
 
 
 def node_inflate_hierarchy(state: ArchitectState) -> ArchitectState:
@@ -72,9 +72,9 @@ def node_done(state: ArchitectState) -> ArchitectState:
     
     summary = (
         "\n"
-        "╔══════════════════════════════════════════════════════════╗\n"
-        "║          LEGACY CHALLENGE ARCHITECT — REPORT             ║\n"
-        "╚══════════════════════════════════════════════════════════╝\n"
+        "=============================================================\n"
+        "         LEGACY CHALLENGE ARCHITECT - REPORT              \n"
+        "=============================================================\n"
         f"  Repository    : {state['github_url']}\n"
         f"  Cloned to     : {state['clone_path']}\n"
         f"  Target file   : {target_rel}\n"
@@ -87,10 +87,10 @@ def node_done(state: ArchitectState) -> ArchitectState:
         f"  Description   : {state['bug_description']}\n"
         "\n"
         "  Files created:\n"
-        "    • challenge_run.py (5 public tests)\n"
-        "    • challenge_run_secret.py (5 secret tests)\n"
-        "    • STUDENT_README.md\n"
-        "    • detailed_explanation.txt (for instructor)\n"
+        "    - challenge_run.py (5 public tests)\n"
+        "    - challenge_run_secret.py (5 secret tests)\n"
+        "    - STUDENT_README.md\n"
+        "    - detailed_explanation.txt (for instructor)\n"
         "\n"
         "  Environment is ready. Share the cloned folder with the student.\n"
     )

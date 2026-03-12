@@ -18,10 +18,14 @@ class ArchitectState(TypedDict):
     bug_description: str   # architect-only description of what was injected
     detailed_explanation: str  # detailed report: where bug is, what it does, how it's hidden
     challenge_summary: str # final printout for the architect
-    test_cases: list       # [{"args": str, "expected": str}, ...] all test cases (10)
-    public_tests: list     # [{"args": str, "expected": str}, ...] 5 public tests
-    secret_tests: list     # [{"args": str, "expected": str}, ...] 5 secret tests
+    test_cases: list       # [{"args": str, "expected": str}, ...] all test cases (LEGACY - for fallback)
+    public_tests: list     # [{"args": str, "expected": str}, ...] 5 public tests (LEGACY)
+    secret_tests: list     # [{"args": str, "expected": str}, ...] 5 secret tests (LEGACY)
     candidate_files: list  # all scored file paths (sorted best-first) for fallback
     bug_func_name: str     # internal: name of the sabotaged helper function (passed between nodes)
     bug_func_source: str   # internal: exact buggy source of the helper (passed between nodes)
     call_chain: dict       # internal: dict of bug_func_name -> [surface_func, ..., bug_func] call chains
+    # Multi-bug support (NEW)
+    bug_specific_tests: dict  # dict of {function_name: [test cases]} for each bug
+    all_bug_data: list        # list of bug metadata dicts (one per bug)
+    sabotaged_functions: list  # list of function names that have bugs

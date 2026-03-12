@@ -1,0 +1,113 @@
+﻿python : C:\Users\rzanzuri\AppData\Roaming\Python\Python314\site-packages\langc
+hain_core\_api\deprecation.py:26: UserWarning: Core Pydantic V1 functionality 
+isn't compatible with Python 3.14 or greater.
+At line:1 char:122
++ ... nterview2'; python main.py https://github.com/mahmoud/boltons.git --n ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (C:\Users\rzanzu....14 or greater. 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+[architect] Starting ù URL: https://github.com/mahmoud/boltons.git  Nesting: 2  Bugs: 1  Refactoring: False  Debug: ON
+
+[cloner] Removing existing clone at C:\Users\rzanzuri\OneDrive - Intel Corporation\Desktop\MySecond\Second year\Seminar\Project.final\LegacyInterview2\workspaces\boltons
+Traceback (most recent call last):
+  File "C:\Users\rzanzuri\OneDrive - Intel Corporation\Desktop\MySecond\Second 
+year\Seminar\Project.final\LegacyInterview2\main.py", line 91, in <module>
+    main()
+    ~~~~^^
+  File "C:\Users\rzanzuri\OneDrive - Intel Corporation\Desktop\MySecond\Second 
+year\Seminar\Project.final\LegacyInterview2\main.py", line 87, in main
+    graph.invoke(initial_state)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "C:\Users\rzanzuri\AppData\Roaming\Python\Python314\site-packages\langgr
+aph\pregel\main.py", line 3068, in invoke
+    for chunk in self.stream(
+                 ~~~~~~~~~~~^
+        input,
+        ^^^^^^
+    ...<10 lines>...
+        **kwargs,
+        ^^^^^^^^^
+    ):
+    ^
+  File "C:\Users\rzanzuri\AppData\Roaming\Python\Python314\site-packages\langgr
+aph\pregel\main.py", line 2643, in stream
+    for _ in runner.tick(
+             ~~~~~~~~~~~^
+        [t for t in loop.tasks.values() if not t.writes],
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+        schedule_task=loop.accept_push,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ):
+    ^
+  File "C:\Users\rzanzuri\AppData\Roaming\Python\Python314\site-packages\langgr
+aph\pregel\_runner.py", line 167, in tick
+    run_with_retry(
+    ~~~~~~~~~~~~~~^
+        t,
+        ^^
+    ...<10 lines>...
+        },
+        ^^
+    )
+    ^
+  File "C:\Users\rzanzuri\AppData\Roaming\Python\Python314\site-packages\langgr
+aph\pregel\_retry.py", line 42, in run_with_retry
+    return task.proc.invoke(task.input, config)
+           ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rzanzuri\AppData\Roaming\Python\Python314\site-packages\langgr
+aph\_internal\_runnable.py", line 656, in invoke
+    input = context.run(step.invoke, input, config, **kwargs)
+  File "C:\Users\rzanzuri\AppData\Roaming\Python\Python314\site-packages\langch
+ain_core\runnables\base.py", line 4880, in invoke
+    return self._call_with_config(
+           ~~~~~~~~~~~~~~~~~~~~~~^
+        self._invoke,
+        ^^^^^^^^^^^^^
+    ...<2 lines>...
+        **kwargs,
+        ^^^^^^^^^
+    )
+    ^
+  File "C:\Users\rzanzuri\AppData\Roaming\Python\Python314\site-packages\langch
+ain_core\runnables\base.py", line 2058, in _call_with_config
+    context.run(
+    ~~~~~~~~~~~^
+        call_func_with_variable_args,  # type: ignore[arg-type]
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+        **kwargs,
+        ^^^^^^^^^
+    ),
+    ^
+  File "C:\Users\rzanzuri\AppData\Roaming\Python\Python314\site-packages\langch
+ain_core\runnables\config.py", line 433, in call_func_with_variable_args
+    return func(input, **kwargs)  # type: ignore[call-arg]
+  File "C:\Users\rzanzuri\AppData\Roaming\Python\Python314\site-packages\langch
+ain_core\runnables\base.py", line 4737, in _invoke
+    output = call_func_with_variable_args(
+        self.func, input_, config, run_manager, **kwargs
+    )
+  File "C:\Users\rzanzuri\AppData\Roaming\Python\Python314\site-packages\langch
+ain_core\runnables\config.py", line 433, in call_func_with_variable_args
+    return func(input, **kwargs)  # type: ignore[call-arg]
+  File "C:\Users\rzanzuri\OneDrive - Intel Corporation\Desktop\MySecond\Second 
+year\Seminar\Project.final\LegacyInterview2\architect\nodes.py", line 18, in 
+node_clone_repo
+    return clone_repo(state)
+  File "C:\Users\rzanzuri\OneDrive - Intel Corporation\Desktop\MySecond\Second 
+year\Seminar\Project.final\LegacyInterview2\architect\repo_cloner.py", line 
+56, in clone_repo
+    print(f"[cloner] Cloning {url} \u2192 {dest}")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Program Files\Python314\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2192' in 
+position 56: character maps to <undefined>
+During task with name 'clone_repo' and id 
+'ba151a2c-146f-7f6b-22af-1979b6335450'

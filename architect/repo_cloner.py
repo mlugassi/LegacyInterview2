@@ -53,7 +53,7 @@ def clone_repo(state: ArchitectState) -> ArchitectState:
         print(f"[cloner] Removing existing clone at {dest}")
         _rmtree_with_retry(dest)
 
-    print(f"[cloner] Cloning {url} → {dest}")
+    print(f"[cloner] Cloning {url} -> {dest}")
     git.Repo.clone_from(url, dest)
     print(f"[cloner] Done.")
 

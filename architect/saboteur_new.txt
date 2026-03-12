@@ -1,0 +1,197 @@
+def saboteur_init(state: ArchitectState) -> ArchitectState:
+    """
+    NEW SIMPLE WORKFLOW:
+    1. Pick num_bugs SIMPLE functions (depth 1 - standalone)
+    2. For each function:
+       a. Generate 6+ tests FOR THAT FUNCTION DIRECTLY
+       b. Inject bug INTO THAT FUNCTION  
+       c. Verify at least 3 tests detect the bug
+    3. Save all buggy functions with their tests
+    4. Inflation pass (later) will add wrapper layers
+    """
+    target_nesting = state["nesting_level"]
+    debug_mode = state.get("debug_mode", False)
+    n_bugs = max(1, state.get("num_bugs") or 1)
+
+    candidate_files = list(state.get("candidate_files") or [state["target_file"]])
+    
+    if debug_mode:
+        print(f"\n[saboteur_init] === NEW SIMPLE WORKFLOW ===")
+        print(f"[saboteur_init] Requested bugs: {n_bugs}")
+        print(f"[saboteur_init] Target nesting: {target_nesting}")
+    
+    # Try each candidate file
+    for current_file in candidate_files:
+        with open(current_file, encoding="utf-8", errors="ignore") as f:
+            source = f.read()
+        
+        if debug_mode:
+            print(f"\n[saboteur_init] Trying file: {current_file}")
+        
+        # Pick n_bugs simple functions
+        selected_funcs = _pick_simple_functions(source, n_bugs)
+        
+        if not selected_funcs:
+            if debug_mode:
+                print(f"[saboteur_init] Not enough suitable functions in {current_file}")
+            continue
+        
+        if debug_mode:
+            print(f"[saboteur_init] Selected {len(selected_funcs)} functions: {selected_funcs}")
+        
+        llm = ChatOpenAI(model="gpt-4o", temperature=0.7)
+        current_source = source  
+        all_bugs_data = []
+        bug_specific_tests = {}  # {func_name: [test cases that detect this bug]}
+        
+        # Inject bug in each function (DIRECT MODE)
+        for idx, func_name in enumerate(selected_funcs, 1):
+            if debug_mode:
+                print(f"\n[saboteur_init] === BUG {idx}/{len(selected_funcs)}: {func_name} ===")
+            
+            source_before_bug = current_source
+            
+            # Call _sabotage_one_helper in DIRECT mode
+            # (function is its own surface - no call chain)
+            new_source, data = _sabotage_one_helper(
+                bug_func_name=func_name,
+                current_source=current_source,
+                surface_func_name=func_name,  # Same function!
+                surface_source="",  # Not needed in direct mode
+                instructions=_BUG_INJECTION_SYSTEM_PROMPT,
+                llm=llm,
+                indirect_mode=False,  # DIRECT MODE
+                call_chain=[func_name],
+                previous_bugs=[],
+                target_nesting=target_nesting,
+                file_path=current_file,
+                debug_mode=debug_mode
+            )
+            
+            if new_source is None:
+                if debug_mode:
+                    print(f"[saboteur_init] Failed to inject bug in {func_name}, skipping")
+                continue
+            
+            # Get tests from data
+            test_cases = data.get("test_cases", [])
+            
+            # Count how many tests detect THIS bug
+            detecting_tests = []
+            for tc in test_cases:
+                args = tc.get("args", "()")
+                
+                # Skip invalid tests
+                if "lambda" in args or "range(" in args:
+                    continue
+                try:
+                    eval(args, {"__builtins__": {}})
+                except:
+                    continue
+                
+                # Run on BEFORE and AFTER
+                before_ok, before_result = _try_exec(source_before_bug, func_name, args, current_file)
+                after_ok, after_result = _try_exec(new_source, func_name, args, current_file)
+                
+                # Test detects bug if results differ
+                if before_ok != after_ok or (before_ok and after_ok and before_result != after_result):
+                    detecting_tests.append({
+                        "args": args,
+                        "expected": before_result if before_ok else before_result
+                    })
+            
+            num_detecting = len(detecting_tests)
+            
+            if debug_mode:
+                print(f"[saboteur_init] Bug in '{func_name}': {num_detecting}/{len(test_cases)} tests detect it")
+            
+            # Validate: need at least 3 detecting tests
+            if num_detecting < 3:
+                if debug_mode:
+                    print(f"[saboteur_init] Not enough detecting tests ({num_detecting} < 3), skipping this bug")
+                continue
+            
+            # Bug is good!
+            current_source = new_source
+            all_bugs_data.append(data)
+            bug_specific_tests[func_name] = detecting_tests
+            
+            if debug_mode:
+                print(f"[saboteur_init] ✓ Bug #{idx} injected successfully")
+        
+        # Check if we got at least one bug
+        if not all_bugs_data:
+            if debug_mode:
+                print(f"[saboteur_init] No bugs successfully injected in {current_file}")
+            continue
+        
+        if debug_mode:
+            print(f"\n[saboteur_init] === SUCCESS: {len(all_bugs_data)}/{n_bugs} bugs injected ===")
+        
+        # Collect all unique tests
+       all_test_cases = []
+        seen_args = set()
+        for func_name, tests in bug_specific_tests.items():
+            for tc in tests:
+                args = tc.get("args", "()")
+                if args not in seen_args:
+                    seen_args.add(args)
+                    all_test_cases.append(tc)
+        
+        # Split into public/secret (50/50)
+        random.shuffle(all_test_cases)
+        mid = len(all_test_cases) // 2
+        public_tests = all_test_cases[:mid] if mid > 0 else all_test_cases[:1]
+        secret_tests = all_test_cases[mid:] if mid > 0 else all_test_cases[1:]
+        
+        if debug_mode:
+            print(f"[saboteur_init] Total unique tests: {len(all_test_cases)}")
+            print(f"[saboteur_init] Public: {len(public_tests)}, Secret: {len(secret_tests)}")
+        
+        # Get first failing test for display
+        first_fail_args = first_expected = first_actual = None
+        for tc in all_test_cases:
+            args = tc.get("args", "()")
+            expected = tc.get("expected")
+            _, actual = _try_exec(current_source, selected_funcs[0], args, current_file)
+            if expected != actual:
+                first_fail_args, first_expected, first_actual = args, expected, actual
+                break
+        
+        # Build bug description
+        bug_descriptions = [d.get("bug_description", "") for d in all_bugs_data]
+        combined_desc = " | ".join(bug_descriptions)
+        
+        # Save to state
+        state["target_file"] = current_file
+        state["original_code"] = source
+        state["sabotaged_code"] = current_source
+        state["function_name"] = selected_funcs[0]  # First function as surface
+        state["test_args"] = first_fail_args or "()"
+        state["expected_output"] = first_expected or ""
+        state["actual_output"] = first_actual or ""
+        state["test_cases"] = all_test_cases
+        state["public_tests"] = public_tests
+        state["secret_tests"] = secret_tests
+        state["bug_description"] = combined_desc
+        state["all_bug_data"] = all_bugs_data
+        state["bug_specific_tests"] = bug_specific_tests  # For inflation pass
+        state["sabotaged_functions"] = selected_funcs  # List of functions with bugs
+        
+        # Store original buggy function source for inflation
+        if all_bugs_data:
+            state["bug_func_name"] = all_bugs_data[0].get("_debug_func_name", selected_funcs[0])
+            state["bug_func_source"] = all_bugs_data[0].get("_debug_sabot_func", "")
+            state["original_bug_func_source"] = all_bugs_data[0].get("_debug_func_source", "")
+        
+        if debug_mode:
+            print(f"\n[saboteur_init] === COMPLETE ===")
+            print(f"[saboteur_init] File: {current_file}")
+            print(f"[saboteur_init] Bugs: {selected_funcs}")
+            print(f"[saboteur_init] Description: {combined_desc}")
+            print(f"[saboteur_init] Tests: {len(all_test_cases)} total ({len(public_tests)} public + {len(secret_tests)} secret)")
+        
+        return state
+    
+    # If we get here, no file worked
+    raise RuntimeError(f"Failed to inject bugs in any of {len(candidate_files)} candidate files")

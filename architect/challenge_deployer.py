@@ -14,116 +14,192 @@ def _module_import_path(clone_path: str, target_file: str) -> str:
 
 def deploy_challenge(state: ArchitectState) -> ArchitectState:
     clone_path  = state["clone_path"]
-    module_path = _module_import_path(clone_path, state["target_file"])
-    func        = state["function_name"]
+    target_file = state["target_file"]
+    module_path = _module_import_path(clone_path, target_file)
     
-    # Get public and secret tests
-    public_tests = state.get("public_tests") or []
-    secret_tests = state.get("secret_tests") or []
+    # Get bug-specific data
+    all_bug_data = state.get("all_bug_data") or []
+    bug_specific_tests = state.get("bug_specific_tests") or {}
     
-    # Fallback: if we don't have split tests, split test_cases
-    if not public_tests and not secret_tests:
-        all_tests = state.get("test_cases") or []
-        if not all_tests:
-            all_tests = [{"args": state["test_args"], "expected": state["expected_output"]}]
+    # If no per-bug data, fall back to old single-bug behavior
+    if not all_bug_data:
+        all_bug_data = [{
+            "function_name": state.get("function_name", "target_func"),
+            "bug_description": state.get("bug_description", "Unknown bug")  # Changed from bug_variant
+        }]
+        # Use the global tests
+        public_tests = state.get("public_tests") or []
+        secret_tests = state.get("secret_tests") or []
+        if not public_tests and not secret_tests:
+            all_tests = state.get("test_cases") or []
+            if not all_tests:
+                all_tests = [{"args": state["test_args"], "expected": state["expected_output"]}]
+            mid = len(all_tests) // 2
+            public_tests = all_tests[:mid] if mid > 0 else all_tests
+            secret_tests = all_tests[mid:] if mid > 0 else []
+        func_name = all_bug_data[0]["function_name"]
+        bug_specific_tests[func_name] = public_tests + secret_tests
+    
+    # Split tests for each bug into public/secret
+    bugs_with_tests = []
+    for bug in all_bug_data:
+        func_name = bug["function_name"]
+        all_tests = bug_specific_tests.get(func_name) or []
         mid = len(all_tests) // 2
-        public_tests = all_tests[:mid] if mid > 0 else all_tests
-        secret_tests = all_tests[mid:] if mid > 0 else []
+        public = all_tests[:mid] if mid > 0 else all_tests[:1] if all_tests else []
+        secret = all_tests[mid:] if mid > 0 else all_tests[1:] if len(all_tests) > 1 else []
+        bugs_with_tests.append({
+            "function_name": func_name,
+            "bug_description": bug.get("bug_description", ""),  # Changed from bug_variant
+            "public_tests": public,
+            "secret_tests": secret
+        })
     
-    def _build_test_file_content(tests: list, test_type: str = "public") -> str:
-        """Build the content for a test file."""
-        case_lines = []
-        for tc in tests:
-            args_repr = tc.get("args", "()")
-            # Support both "expected" (from verification) and "correct_output" (from GPT)
-            exp_value = tc.get("expected") or tc.get("correct_output")
-            if not exp_value:
-                exp_value = "None"
+    def _build_multi_bug_test_file(bugs: list, test_type: str = "public") -> str:
+        """Build a test file with separate sections for each bug."""
+        
+        # Helper to format test cases
+        def format_tests(tests):
+            case_lines = []
+            for tc in tests:
+                args_repr = tc.get("args", "()")
+                exp_value = tc.get("expected") or tc.get("correct_output")
+                if not exp_value:
+                    exp_value = "None"
+                
+                # Validate that exp_value is a valid Python literal
+                try:
+                    eval(exp_value, {"__builtins__": {}})
+                    exp_repr = exp_value
+                except:
+                    exp_repr = repr(str(exp_value))
+                
+                # Handle tuple formatting
+                args_str = args_repr.strip()
+                try:
+                    evaluated = eval(args_str)
+                    if not isinstance(evaluated, tuple):
+                        args_str = f"({args_str},)"
+                except:
+                    pass
+                
+                case_lines.append(f"    ({args_str}, {exp_repr}),")
+            return "\n".join(case_lines) if case_lines else "    # No tests"
+        
+        # Build imports section
+        imports = []
+        for bug in bugs:
+            func = bug["function_name"]
+            imports.append(f"from {module_path} import {func}")
+        imports_str = "\n".join(imports)
+        
+        # Build test sections for each bug
+        bug_sections = []
+        test_functions = []
+        for i, bug in enumerate(bugs, 1):
+            func = bug["function_name"]
+            tests = bug.get(f"{test_type}_tests", [])
+            bug_desc = bug.get("bug_description", "")  # Changed from bug_variant
             
-            # Validate that exp_value is a valid Python literal
-            # Try to evaluate it - if it works, it's valid and we use it as-is
-            try:
-                eval(exp_value, {"__builtins__": {}})
-                exp_repr = exp_value  # Already a valid Python literal
-            except:
-                # If eval fails, wrap it as a string literal
-                exp_repr = repr(str(exp_value))
+            # Test cases for this bug
+            cases_literal = format_tests(tests)
             
-            # args_repr should be a properly formatted tuple literal from GPT
-            # However, GPT sometimes forgets the comma for single-element tuples
-            # e.g. ('hello') instead of ('hello',)
-            args_str = args_repr.strip()
+            # Create test function for this bug
+            bug_sections.append(
+                f"# ===== Bug #{i}: {func} =====\n"
+                f"# {bug_desc}\n"
+                f"_BUG{i}_TESTS = [\n{cases_literal}\n]\n"
+            )
             
-            # Try to evaluate the args to check if it's actually a tuple
-            try:
-                evaluated = eval(args_str)
-                # If eval succeeds but result is NOT a tuple, wrap it
-                if not isinstance(evaluated, tuple):
-                    args_str = f"({args_str},)"
-            except:
-                # If eval fails, assume it's already correct format
-                pass
-            
-            case_lines.append(f"    ({args_str}, {exp_repr}),")
-        cases_literal = "\n".join(case_lines) if case_lines else "    # No tests"
-
+            test_functions.append(
+                f"def test_bug{i}():\n"
+                f"    \"\"\"Test Bug #{i}: {func}\"\"\"\n"
+                f"    print(f'\\n===== Testing Bug #{i}: {func} =====')\n"
+                f"    passed = crashed = 0\n"
+                f"    for j, (args, expected) in enumerate(_BUG{i}_TESTS, 1):\n"
+                f"        try:\n"
+                f"            result = {func}(*args)\n"
+                f"            ok = result == expected\n"
+                f"            status = '[PASS]' if ok else '[FAIL]'\n"
+                f"            passed += ok\n"
+                f"            print(f'  Test {{j}}: {{status}}')\n"
+                f"            if not ok:\n"
+                f"                print(f'           args     = {{args!r}}')\n"
+                f"                print(f'           expected = {{expected}}')\n"
+                f"                print(f'           got      = {{result}}')\n"
+                f"        except Exception as exc:\n"
+                f"            crashed += 1\n"
+                f"            print(f'  Test {{j}}: [CRASH] - {{type(exc).__name__}}: {{exc}}')\n"
+                f"            print(f'           args = {{args!r}}')\n"
+                f"    \n"
+                f"    total = len(_BUG{i}_TESTS)\n"
+                f"    return passed, crashed, total\n"
+            )
+        
+        # Build main runner
+        bug_calls = []
+        for i in range(1, len(bugs) + 1):
+            bug_calls.append(f"    p{i}, c{i}, t{i} = test_bug{i}()")
+        
+        total_calc = " + ".join([f"t{i}" for i in range(1, len(bugs) + 1)])
+        passed_calc = " + ".join([f"p{i}" for i in range(1, len(bugs) + 1)])
+        crashed_calc = " + ".join([f"c{i}" for i in range(1, len(bugs) + 1)])
+        
+        main_runner = (
+            "def run_all_tests():\n"
+            "    \"\"\"Run tests for all bugs.\"\"\"\n"
+            + "\n".join(bug_calls) + "\n"
+            f"    \n"
+            f"    total = {total_calc}\n"
+            f"    passed = {passed_calc}\n"
+            f"    crashed = {crashed_calc}\n"
+            f"    broken = total - passed\n"
+            f"    \n"
+            f"    print(f'\\n=========================================')\n"
+            f"    if passed == total:\n"
+            f"        print(f'=== ALL TESTS PASSED ({{passed}}/{{total}}) ===')\n"
+            f"        return True\n"
+            f"    elif crashed == total:\n"
+            f"        print(f'=== ALL TESTS CRASHED ({{crashed}}/{{total}}) ===')\n"
+            f"        return False\n"
+            f"    else:\n"
+            f"        print(f'=== {{broken}}/{{total}} tests failed ({{crashed}} crash, {{broken-crashed}} wrong) ===')\n"
+            f"        return False\n"
+        )
+        
+        # Combine everything
         return (
             "import sys\n"
             "import os\n\n"
-            "# Ensure UTF-8 output on Windows (avoids UnicodeEncodeError with ✓/✗ chars)\n"
+            "# Ensure UTF-8 output on Windows\n"
             "if hasattr(sys.stdout, 'reconfigure'):\n"
             "    sys.stdout.reconfigure(encoding='utf-8')\n\n"
             "# Make the repo root importable\n"
             "sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\n\n"
-            f"from {module_path} import {func}\n\n"
-            f"# {test_type.upper()} TEST CASES\n"
-            "# (args_tuple, correct_expected_output)\n"
-            f"_TEST_CASES = [\n{cases_literal}\n]\n\n"
-            "def run_tests():\n"
-            "    passed = crashed = 0\n"
-            "    for i, (args, expected) in enumerate(_TEST_CASES, 1):\n"
-            "        try:\n"
-            f"            result = {func}(*args)\n"
-            "            ok = result == expected\n"
-            "            status = '[PASS]' if ok else '[FAIL]'\n"
-            "            passed += ok\n"
-            "            print(f'  Test {i}: {status}')\n"
-            "            if not ok:\n"
-            "                print(f'           args     = {args!r}')\n"
-            "                print(f'           expected = {expected}')\n"
-            "                print(f'           got      = {result}')\n"
-            "        except Exception as exc:\n"
-            "            crashed += 1\n"
-            "            print(f'  Test {i}: [CRASH] - {type(exc).__name__}: {exc}')\n"
-            "            print(f'           args = {args!r}')\n\n"
-            "    total = len(_TEST_CASES)\n"
-            "    broken = total - passed\n"
-            "    if passed == total:\n"
-            "        print(f'\\n=== ALL TESTS PASSED ({passed}/{total}) ===')\n"
-            "        return True\n"
-            "    elif crashed == total:\n"
-            "        print(f'\\n=== ALL TESTS CRASHED ({crashed}/{total}) ===')\n"
-            "        return False\n"
-            "    else:\n"
-            "        print(f'\\n=== {broken}/{total} tests failed ({crashed} crash, {broken-crashed} wrong value) ===')\n"
-            "        return False\n\n"
+            f"{imports_str}\n\n"
+            f"# {test_type.upper()} TEST CASES\n\n"
+            + "\n".join(bug_sections) + "\n"
+            + "\n".join(test_functions) + "\n"
+            + main_runner + "\n"
             "if __name__ == '__main__':\n"
-            "    run_tests()\n"
+            "    run_all_tests()\n"
         )
     
-    # Create public test file (5 tests that students can see and run)
+    # Create public test file
     challenge_run_path = os.path.join(clone_path, "challenge_run.py")
-    public_content = _build_test_file_content(public_tests, "public")
+    public_content = _build_multi_bug_test_file(bugs_with_tests, "public")
     with open(challenge_run_path, "w", encoding="utf-8") as f:
         f.write(public_content)
-    print(f"[deployer] Written: {challenge_run_path}  ({len(public_tests)} public test cases)")
+    total_public = sum(len(b["public_tests"]) for b in bugs_with_tests)
+    print(f"[deployer] Written: {challenge_run_path}  ({total_public} public tests across {len(bugs_with_tests)} bugs)")
     
-    # Create secret test file (5 hidden tests for final validation)
+    # Create secret test file
     secret_run_path = os.path.join(clone_path, "challenge_run_secret.py")
-    secret_content = _build_test_file_content(secret_tests, "secret")
+    secret_content = _build_multi_bug_test_file(bugs_with_tests, "secret")
     with open(secret_run_path, "w", encoding="utf-8") as f:
         f.write(secret_content)
-    print(f"[deployer] Written: {secret_run_path}  ({len(secret_tests)} secret test cases)")
+    total_secret = sum(len(b["secret_tests"]) for b in bugs_with_tests)
+    print(f"[deployer] Written: {secret_run_path}  ({total_secret} secret tests across {len(bugs_with_tests)} bugs)")
     
     # Write detailed explanation for instructor
     detailed_path = os.path.join(clone_path, "detailed_explanation.txt")

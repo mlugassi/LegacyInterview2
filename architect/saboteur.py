@@ -19,48 +19,106 @@ _MAX_DEPTH_LEVEL = {1: 4, 2: 4, 3: 4}
 # All levels share the same bug-injection instruction.
 # Structural transformations (obfuscation, spaghettification) are applied as
 # separate post-passes in sabotage() based on the difficulty level.
-_BUG_INJECTION_INSTRUCTION = """
-You are sabotaging a SINGLE Python function with an AI-RESISTANT bug.
 
-STEP 1 — Understand the function contract:
-  Read the function carefully. Identify exactly what it is SUPPOSED to do:
-  its inputs, its expected outputs, and its core logic.
+# ═══════════════════════════════════════════════════════════════════════════
+# STEP 1: TEST GENERATION (happens BEFORE bug injection)
+# ═══════════════════════════════════════════════════════════════════════════
 
-STEP 2 — Invent and inject ONE AI-RESISTANT FUNCTIONAL bug of your own choosing:
-  The bug MUST be subtle, context-dependent, and extremely hard for an LLM to identify
-  by reading the function in isolation. It should require deep understanding of the
-  surrounding logic or call context to detect.
+_TEST_GENERATION_SYSTEM_PROMPT = """
+You are an expert test creator for Python functions.
 
-  PREFERRED bug types (pick whichever fits this specific function best):
-    * Off-by-one in a specific edge case — wrong loop bound or index that only
-      matters for a particular pattern of inputs (e.g. empty sequences, odd-length lists)
-    * Subtle operator swap that is only wrong in certain conditions — e.g. < vs <=,
-      + vs -, | vs &, that look correct at first glance but fail on boundary values
-    * Wrong variable used in a rare branch — copies a visually similar variable name
-      in the wrong context so casual readers assume it is correct
-    * Precedence error — missing parentheses that change evaluation order only for
-      specific operand combinations, not for the common case
-    * State-dependent side effect — a mutation or accumulation that only causes a
-      visible result mismatch after specific sequences of operations
-    * Subtle type / comparison issue — comparing by identity instead of value, or an
-      implicit type coercion that produces the wrong result for certain input types
-    * Wrong default assumption — a constant, threshold, or sentinel that is slightly
-      off (e.g. 0 instead of 1, -1 instead of None) but only matters in edge cases
+Your job: Generate 6-10 diverse test cases for a given function.
 
-  Requirements:
-    * The code must still run without exceptions on valid inputs
-    * The function must return a WRONG RESULT for at least some inputs
-    * The bug must be non-obvious — a student must read the logic carefully to spot it
-    * The bug must NOT be trivially fixable by an LLM reading the function in isolation;
-      it should look plausible and correct at a quick glance
-  Make 1–3 small coordinated changes to produce the behavioral failure.
-  Do NOT rename any variables, do NOT add comments.
-  Return the function with ONLY the bug injected — keep everything else identical.
+CRITICAL RULES FOR TEST ARGUMENTS:
+1. ONLY positional arguments - NO keyword arguments, NO **kwargs
+2. NO lambda functions, NO range(), NO generators, NO iterators
+3. Use only primitives: int, float, str, list, dict, bool, None
+4. Each "args" must be a STRING containing a valid Python tuple literal
+5. For functions expecting iterables: use LISTS, not range() or generators
+
+GOOD examples (args as STRINGS):
+- "(5,)"
+- "([1,2,3], 2)"
+- "('hello', 'world')"
+- "({'a': 1}, 'a')"
+- "([], 0)"
+- "([10, 20, 30, 40],)"  ← Use LIST for iterable, NOT range()
+
+BAD examples (NEVER DO THIS):
+- "([1,2,3], fill=0)"  ❌ NO kwargs!
+- "(lambda x: x,)"  ❌ NO lambdas!
+- "(range(10),)"  ❌ NO range! Use "([0,1,2,3,4,5,6,7,8,9],)" instead
+- "(iter([1,2,3]),)"  ❌ NO iter()! Use "([1,2,3],)" directly
+
+Return ONLY valid JSON (no markdown):
+{
+  "test_cases": [
+    {"args": "(5,)"},
+    {"args": "([1,2,3], 2)"},
+    ...
+  ]
+}
+
+CRITICAL: The "args" value must be a STRING, not actual Python syntax!
+Use double quotes around the tuple literal string.
+
+Focus on:
+- Normal cases
+- Edge cases (empty, None, zero, negative)
+- Boundary values
+- Different data types/sizes
 """
 
-_LEVEL_INSTRUCTIONS = {1: _BUG_INJECTION_INSTRUCTION,
-                       2: _BUG_INJECTION_INSTRUCTION,
-                       3: _BUG_INJECTION_INSTRUCTION}
+# ═══════════════════════════════════════════════════════════════════════════
+# STEP 2: BUG INJECTION (happens AFTER tests are generated)
+# ═══════════════════════════════════════════════════════════════════════════
+
+_BUG_INJECTION_SYSTEM_PROMPT = """
+You are a bug injection specialist.
+
+You will receive:
+1. A Python function (ORIGINAL, working correctly)
+2. Test cases with their CURRENT outputs on the original function
+
+Your task: Inject ONE subtle bug so that AT LEAST HALF of the tests will produce DIFFERENT outputs.
+
+CRITICAL REQUIREMENT:
+- You MUST mentally trace through EACH test case on both the original and buggy versions
+- Verify that at least 50% of tests will show DIFFERENT outputs
+- If a test shows the SAME output on both versions, the bug is TOO SUBTLE or in the WRONG place
+
+BEST BUG TYPES (choose ONE that WILL affect the test outputs you see):
+1. Off-by-one in loop: range(len(lst)) → range(len(lst)-1)
+2. Wrong operator: < → <=, + → -, and → or  
+3. Wrong variable: total += value → total += old_value
+4. Wrong initialization: count = 0 → count = 1
+5. Wrong boundary: if x > 0 → if x >= 0
+
+EXAMPLE - GOOD BUG SELECTION:
+Test 1: input [1,2,3,4], output [2,3,4,5]  
+Test 2: input [10,20,30], output [20,30,40]
+→ Change `x + 1` to `x + 2` 
+→ Test 1 will now output [3,4,5,6] ✓ DIFFERENT
+→ Test 2 will now output [30,40,50] ✓ DIFFERENT
+
+CRITICAL RULES:
+- Change EXACTLY ONE thing (one operator, one number, one variable name)
+- Bug must cause WRONG OUTPUT (not crashes!)
+- Do NOT add comments
+- Do NOT rename function or parameters
+- Function must still RUN without exceptions
+- At least HALF of the provided tests must produce DIFFERENT outputs
+
+Return ONLY valid JSON (no markdown):
+{
+  "sabotaged_function_code": "<complete function def block>",
+  "bug_description": "<one sentence: what you changed and why it fails>"
+}
+"""
+
+_LEVEL_INSTRUCTIONS = {1: _BUG_INJECTION_SYSTEM_PROMPT,
+                       2: _BUG_INJECTION_SYSTEM_PROMPT,
+                       3: _BUG_INJECTION_SYSTEM_PROMPT}
 
 _SYSTEM_PROMPT = """
 You are the Legacy Challenge Architect. You will receive either ONE or TWO Python functions.
@@ -82,13 +140,9 @@ Reply with ONLY a valid JSON object (no markdown, no explanation), matching this
   "test_cases_public": [
     {"args": "<Python literal tuple of args, e.g. (10, 3) or ('hello',)>", "correct_output": "<correct return value for the ORIGINAL function>"},
     {"args": "...", "correct_output": "..."},
-    {"args": "...", "correct_output": "..."},
-    {"args": "...", "correct_output": "..."},
     {"args": "...", "correct_output": "..."}
   ],
   "test_cases_secret": [
-    {"args": "...", "correct_output": "..."},
-    {"args": "...", "correct_output": "..."},
     {"args": "...", "correct_output": "..."},
     {"args": "...", "correct_output": "..."},
     {"args": "...", "correct_output": "..."}
@@ -98,33 +152,37 @@ Reply with ONLY a valid JSON object (no markdown, no explanation), matching this
 
 CRITICAL TEST CASE REQUIREMENTS:
 
-PUBLIC TESTS (test_cases_public) - 5 SIMPLER TESTS FOR DEVELOPMENT:
-- These help the student understand the basic problem
-- Cover normal/common use cases
-- 2-3 should PASS (function works for simple inputs where bug doesn't trigger)
-- 2-3 should FAIL (exposing the bug in obvious cases)
-- Examples: typical inputs, small numbers, simple strings
-- Goal: Guide the student toward understanding what's broken
-- IMPORTANT: At least 2 tests MUST expose the injected bug!
+You must create EXACTLY 3 PUBLIC tests and EXACTLY 3 SECRET tests.
+Each test must be specifically designed to expose YOUR specific bug!
 
-SECRET TESTS (test_cases_secret) - 5 HARDER TESTS FOR FINAL VALIDATION:
-- These tests MUST be significantly harder and more precise
-- At least 3-4 should expose the bug in subtle/edge-case scenarios
-- Focus on boundary conditions, edge cases, corner cases where the bug manifests
-- Examples: empty inputs, None, zero, negative numbers, very large values, special characters
-- These tests should FAIL even if the student makes a partial/incomplete fix
-- Goal: Ensure the fix is complete and handles all edge cases correctly
-- CRITICAL: Design these tests specifically to trigger the bug you injected!
+PUBLIC TESTS (test_cases_public) - EXACTLY 3 TESTS:
+- Test #1: Normal case that should FAIL because of your bug
+- Test #2: Edge case that exposes your bug clearly
+- Test #3: Another case that shows the bug pattern
+- At least 2 out of 3 MUST fail on the buggy code
+- These give the student hints about what's wrong
+- Focus on obvious manifestations of your specific bug
 
-TEST COVERAGE REQUIREMENT:
-- Your tests MUST actually detect the bug you injected
-- At least 30-40% of all tests (public + secret combined) should FAIL on the sabotaged code
-- If your bug is "off-by-one in loop", create tests with edge cases that expose it
-- If your bug is "wrong operator", create tests where that operator matters
-- Don't create generic tests that happen to pass despite the bug!
+SECRET TESTS (test_cases_secret) - EXACTLY 3 TESTS:
+- Test #1: Boundary/edge case for your specific bug
+- Test #2: Corner case that only fails if bug is NOT fixed
+- Test #3: Tricky input that reveals incomplete fixes
+- At least 2 out of 3 MUST fail on the buggy code
+- These verify complete fix, not just partial workaround
+- Examples: empty list, None, zero, negative, very large values
 
-IMPORTANT: If all 5 public tests pass, it should NOT guarantee that all 5 secret tests pass!
-The secret tests must catch incomplete fixes that work for simple cases but fail on edges.
+MANDATORY REQUIREMENT:
+- If you injected "range(n-1)" bug → test with lists of different lengths
+- If you injected "<=" bug → test with values exactly at the boundary
+- If you injected wrong variable → test where that variable matters
+- Your tests MUST actually catch YOUR SPECIFIC bug!
+- DO NOT create generic tests that pass despite the bug!
+
+TEST VALIDATION:
+- At least 4 out of 6 total tests MUST fail on buggy code
+- If bug is in loop condition → tests must trigger loop edge cases
+- If bug is in comparison → tests must hit the comparison boundary
+- NO TEST should crash with exceptions - only wrong output values
 
 Critical rules:
 - sabotaged_function_code must be ONLY the function definition (def ...: ...) — nothing before or after.
@@ -145,6 +203,89 @@ Critical rules:
   Each "correct_output" is the return value of the ORIGINAL (unfixed) function — not the buggy one.
   Example args: (10, 3) or (['a','b','c'],) or ("hello world",) or ([1, 2, 3],) — nothing else.
 - Do NOT include any text outside the JSON object.
+
+====================
+COMPLETE EXAMPLE - STUDY THIS BEFORE YOU START!
+====================
+
+Original function:
+```python
+def get_last_n(lst, n):
+    \"\"\"Return the last n elements of list.\"\"\"
+    if n <= 0:
+        return []
+    return lst[-n:]
+```
+
+BUGGY version (off-by-one in slice):
+```python
+def get_last_n(lst, n):
+    \"\"\"Return the last n elements of list.\"\"\"
+    if n <= 0:
+        return []
+    return lst[-(n-1):]  # BUG: slice index off by one!
+```
+
+Why this is a GOOD bug:
+- Simple one-operator change: -n becomes -(n-1)
+- Returns wrong value (too many elements)
+- Doesn't crash
+- Subtle - looks like it could be correct
+
+====================
+CRITICAL: HOW TO CREATE TESTS THAT CATCH YOUR BUG
+====================
+
+STEP 1: Create the bug FIRST
+STEP 2: Mentally execute EACH test on BOTH versions (original and buggy)
+STEP 3: Verify that at least 4 tests have DIFFERENT outputs between the two versions
+
+MENTAL EXECUTION EXAMPLE:
+
+Test: ([1,2,3,4,5], 2)
+  Original code: lst[-2:] = [4,5]  OK
+  Buggy code: lst[-(2-1):] = lst[-1:] = [5]  X DIFFERENT!
+  
+Test: ([10,20,30], 1) 
+  Original: lst[-1:] = [30]  OK
+  Buggy: lst[-(1-1):] = lst[0:] = [10,20,30]  X DIFFERENT!
+
+Test: (['a','b','c','d'], 3)
+  Original: lst[-3:] = ['b','c','d']  OK
+  Buggy: lst[-2:] = ['c','d']  X DIFFERENT!
+
+Result: 3/3 tests show different outputs = GOOD! The tests CATCH the bug.
+
+IF YOUR TESTS DO NOT SHOW DIFFERENT OUTPUTS, THEY ARE WRONG!
+
+Tests that EXPOSE this bug:
+```json
+{
+  "test_cases_public": [
+    {"args": "([1,2,3,4,5], 2)", "correct_output": "[4,5]"},
+    {"args": "([10,20,30], 1)", "correct_output": "[30]"},
+    {"args": "(['a','b','c','d'], 3)", "correct_output": "['b','c','d']"}
+  ],
+  "test_cases_secret": [
+    {"args": "([1], 1)", "correct_output": "[1]"},
+    {"args": "([5,6,7,8,9], 4)", "correct_output": "[6,7,8,9]"},
+    {"args": "([], 2)", "correct_output": "[]"}
+  ]
+}
+```
+
+Why these tests WORK:
+- Test ([1,2,3,4,5], 2): Original returns [4,5], Buggy returns [3,4,5] - FAILS OK
+- Test ([10,20,30], 1): Original returns [30], Buggy returns [20,30] - FAILS OK
+- Test (['a','b','c','d'], 3): Original returns ['b','c','d'], Buggy returns ['a','b','c','d'] - FAILS OK
+- Test ([1], 1): Original returns [1], Buggy returns [1,1] or crashes - edge case OK
+- Test ([5,6,7,8,9], 4): Original returns [6,7,8,9], Buggy returns [5,6,7,8,9] - FAILS OK
+
+Result: 4+ out of 6 tests fail on buggy code!
+
+====================
+NOW DO THE SAME FOR YOUR FUNCTION!
+====================
 """
 
 
@@ -213,7 +354,7 @@ def _pick_best_function(source: str, exclude: set[str] | None = None) -> str:
             raise ValueError("No suitable public module-level function found in the target file.")
         fresh = [f for f in fallback_funcs if f not in exclude] or fallback_funcs
         chosen = random.choice(fresh)
-        print(f"[saboteur] Function candidates (fallback): {fallback_funcs} → chose '{chosen}'")
+        print(f"[saboteur] Function candidates (fallback): {fallback_funcs} -> chose '{chosen}'")
         return chosen
 
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -221,7 +362,7 @@ def _pick_best_function(source: str, exclude: set[str] | None = None) -> str:
     fresh_scored = [(s, n) for s, n in scored if n not in exclude]
     pool = fresh_scored[:3] if fresh_scored else scored[:3]
     _, chosen = random.choice(pool)
-    print(f"[saboteur] Function candidates: {[n for _, n in scored[:5]]} → chose '{chosen}'"
+    print(f"[saboteur] Function candidates: {[n for _, n in scored[:5]]} -> chose '{chosen}'"
           + (f" (excluded: {sorted(exclude)})" if exclude else ""))
     return chosen
 
@@ -382,7 +523,7 @@ def _pick_surface_function(source: str, max_depth: int,
                 chosen = name
                 break
         all_names = [n for _, n in caller_candidates]
-        print(f"[saboteur] Surface candidates (deep chains): {all_names} → '{chosen}'"
+        print(f"[saboteur] Surface candidates (deep chains): {all_names} -> '{chosen}'"
               + (f" (excluded: {sorted(exclude)})" if exclude else ""))
         return chosen, module_func_nodes
 
@@ -485,6 +626,154 @@ def _variables_were_renamed(original_func: str, sabotaged_func: str) -> bool:
     return bool(orig - sabot)
 
 
+def _generate_tests_for_function(
+    func_source: str,
+    func_name: str,
+    surface_func_name: str,
+    surface_source: str,
+    llm,
+    indirect_mode: bool,
+    debug_mode: bool = False,
+) -> dict | None:
+    """
+    Generate 6-10 test cases for a function WITHOUT injecting any bugs.
+    Tests are created for the ORIGINAL, working function.
+    Returns dict with test_cases list, or None on failure.
+    """
+    
+    if indirect_mode:
+        user_content = (
+            f"SURFACE FUNCTION (this is what the student will call):\n"
+            f"```python\n{surface_source}\n```\n\n"
+            f"HELPER FUNCTION (you're testing the SURFACE via this helper):\n"
+            f"```python\n{func_source}\n```\n\n"
+            f"Generate test args for calling {surface_func_name}."
+        )
+    else:
+        user_content = (
+            f"FUNCTION TO TEST:\n```python\n{func_source}\n```"
+        )
+    
+    for attempt in range(1, 3):
+        if debug_mode:
+            print(f"[test_gen] Generating 6-10 tests for '{func_name}' (attempt {attempt})...")
+        
+        try:
+            response = llm.invoke([
+                SystemMessage(content=_TEST_GENERATION_SYSTEM_PROMPT),
+                HumanMessage(content=user_content),
+            ])
+            
+            if debug_mode:
+                print(f"[test_gen] Raw GPT response preview: {response.content[:200]}...")
+            
+            data = _parse_response(response.content)
+            
+            test_cases = data.get("test_cases", [])
+            
+            if len(test_cases) >= 6:
+                data["test_cases"] = test_cases[:10]  # Keep at most 10
+                if debug_mode:
+                    print(f"[test_gen] OK: Generated {len(data['test_cases'])} tests")
+                return data
+            
+            if debug_mode:
+                print(f"[test_gen] Not enough tests: got {len(test_cases)}, need 6+")
+        
+        except json.JSONDecodeError as e:
+            if debug_mode:
+                print(f"[test_gen] JSON parse error: {e}")
+                print(f"[test_gen] Full response: {response.content}")
+            continue
+        except Exception as e:
+            if debug_mode:
+                print(f"[test_gen] Error: {e}")
+            continue
+    
+    return None
+
+
+def _inject_bug_into_function(
+    func_source: str,
+    func_name: str,
+    llm,
+    attempted_bugs: list[str] | None = None,
+    test_cases: list[dict] | None = None,
+    original_results: dict | None = None,
+    debug_mode: bool = False,
+) -> dict | None:
+    """
+    Inject ONE simple bug into a function.
+    GPT sees test cases and their expected outputs to create a bug that WILL be detectable.
+    Returns dict with sabotaged_function_code and bug_description, or None on failure.
+    """
+    forbidden_bugs = ""
+    if attempted_bugs:
+        listed = "\n".join(f"  - {b}" for b in attempted_bugs)
+        forbidden_bugs = f"\n\nFORBIDDEN (already tried):\n{listed}\nChoose a DIFFERENT bug type!"
+    
+    # Build test cases section with current outputs from ORIGINAL function
+    test_info = ""
+    if test_cases and original_results:
+        test_info = "\n\nTEST CASES (all currently PASSING on the ORIGINAL function):\n"
+        for i, test in enumerate(test_cases, 1):
+            args = test.get("args", "") or test.get("test_args", "")
+            if args in original_results:
+                success, result = original_results[args]
+                if success:
+                    test_info += f"{i}. Input: {args}\n   Current Output (before bug): {result}\n\n"
+        test_info += "\nYour bug must cause AT LEAST HALF of these tests to produce DIFFERENT outputs.\n"
+    
+    user_content = f"""
+FUNCTION TO INJECT BUG INTO:
+
+```python
+{func_source}
+```
+{test_info}{forbidden_bugs}
+"""
+    
+    for attempt in range(1, 3):
+        if debug_mode:
+            print(f"[bug_inject] Injecting bug into '{func_name}' (attempt {attempt})...")
+        
+        try:
+            response = llm.invoke([
+                SystemMessage(content=_BUG_INJECTION_SYSTEM_PROMPT),
+                HumanMessage(content=user_content),
+            ])
+            
+            content = response.content.strip()
+            # Remove markdown if present
+            if content.startswith("```"):
+                parts = content.split("```")
+                content = parts[1] if len(parts) > 1 else content
+                if content.startswith("json"):
+                    content = content[4:].strip()
+            
+            data = json.loads(content)
+            buggy_code = data.get("sabotaged_function_code", "")
+            
+            # Validate syntax
+            try:
+                ast.parse(buggy_code)
+                if debug_mode:
+                    print(f"[bug_inject] OK: {data.get('bug_description', 'N/A')}")
+                return data
+            except SyntaxError:
+                if debug_mode:
+                    print(f"[bug_inject] Syntax error in buggy code")
+                continue
+        
+        except Exception as e:
+            if debug_mode:
+                print(f"[bug_inject] Error: {e}")
+            continue
+    
+    return None
+
+
+
 def _format_bug_diff(
     func_name: str,
     file_start_line: int,
@@ -524,6 +813,34 @@ def _format_bug_diff(
     return header + "\n".join([""] + diff_lines) + "\n  └─"
 
 
+def _execute_tests_on_source(
+    source: str,
+    func_name: str, 
+    test_data: dict,
+    file_path: str | None = None,
+    debug_mode: bool = False
+) -> dict:
+    """
+    Execute all tests on the given source code.
+    Returns dict mapping test_args_str -> (success, result_str)
+    """
+    results = {}
+    all_tests = test_data.get("test_cases", [])
+    
+    for test in all_tests:
+        test_args_str = test.get("args", "") or test.get("test_args", "")
+        if not test_args_str:
+            continue
+        success, result = _try_exec(source, func_name, test_args_str, file_path)
+        results[test_args_str] = (success, result)
+        
+        if debug_mode:
+            status = "OK" if success else "FAIL"
+            print(f"[saboteur]   Test {test_args_str} -> {status}: {result[:50]}")
+    
+    return results
+
+
 def _sabotage_one_helper(
     bug_func_name: str,
     current_source: str,
@@ -535,88 +852,103 @@ def _sabotage_one_helper(
     call_chain: list[str] | None = None,
     previous_bugs: list[str] | None = None,
     target_nesting: int = 3,
+    file_path: str | None = None,
     debug_mode: bool = False,
 ) -> tuple[str, dict] | tuple[None, None]:
     """
-    Ask GPT to sabotage bug_func_name within current_source.
-    call_chain is the path from surface_func_name down to bug_func_name.
-    previous_bugs is a list of bug_description strings from prior failed attempts.
-    target_nesting indicates the desired call-chain depth.
-    Splices result back. Returns (new_source, data_dict) or (None, None) on failure.
+    TWO-PHASE APPROACH:
+    1. Generate 6-10 tests on the WORKING code
+    2. Inject bug into function (GPT sees tests and must fail at least half)
+    3. Validate that bug is detectable by at least 1 test
+    
+    Returns (buggy_source, data_dict) or (None, None) on failure.
     """
     func_source, start_line, end_line = _extract_function_source(current_source, bug_func_name)
 
-    def _build_user_content(extra: str = "") -> str:
-        forbidden = ""
-        if previous_bugs:
-            listed = "\n".join(f"  - {b}" for b in previous_bugs)
-            forbidden = (
-                f"\n\nFORBIDDEN (already tried — use a COMPLETELY DIFFERENT bug type):\n{listed}"
-            )
-        if indirect_mode:
-            chain_str = " → ".join(call_chain) if call_chain else f"{surface_func_name} → {bug_func_name}"
-            depth = len(call_chain) - 1 if call_chain else 1
-            return (
-                f"SABOTAGE INSTRUCTIONS:\n{instructions}{forbidden}\n\n"
-                f"INVESTIGATION CHAIN the student must follow (depth {depth}):\n"
-                f"  {chain_str}\n"
-                f"The student is only told that `{surface_func_name}` returns wrong results.\n"
-                f"They must trace {depth} level(s) of calls to find the bug.\n\n"
-                f"SURFACE FUNCTION (entry point the student tests — do NOT modify it):\n"
-                f"```python\n{surface_source}\n```\n\n"
-                f"HELPER FUNCTION TO SABOTAGE (inject the bug into THIS function only):\n"
-                f"```python\n{func_source}\n```\n\n"
-                f"CRITICAL: test_args must be valid arguments for calling `{surface_func_name}`. "
-                f"expected_output and actual_output must be the results of calling "
-                f"`{surface_func_name}(test_args)` — correct vs. buggy. "
-                f"Trace how this helper's bug propagates up through {depth} call level(s) "
-                f"to the surface return value.{extra}"
-            )
-        else:
-            return (
-                f"SABOTAGE INSTRUCTIONS:\n{instructions}{forbidden}\n\n"
-                f"FUNCTION TO SABOTAGE:\n```python\n{func_source}\n```{extra}"
-            )
-
-    attempted_bugs: list[str] = []
-
-    for attempt in range(1, 4):
-        extra = ""
-        if attempted_bugs:
-            listed = "\n".join(f"  - {b}" for b in attempted_bugs)
-            extra = f"\n\nThis is retry {attempt}. Previous attempts in THIS call used:\n{listed}\nChoose a DIFFERENT bug approach now."
-        user_content = _build_user_content(extra)
+    # =====================================================================
+    # PHASE 1: GENERATE 6-10 TESTS ON WORKING CODE
+    # =====================================================================
+    if debug_mode:
+        print(f"[saboteur] PHASE 1: Generating 6-10 tests for '{bug_func_name}'...")
+    
+    test_data = _generate_tests_for_function(
+        func_source=func_source,
+        func_name=bug_func_name,
+        surface_func_name=surface_func_name,
+        surface_source=surface_source,
+        llm=llm,
+        indirect_mode=indirect_mode,
+        debug_mode=debug_mode
+    )
+    
+    if test_data is None:
         if debug_mode:
-            print(f"[saboteur] GPT call (func='{bug_func_name}', attempt={attempt})…")
-        response = llm.invoke([
-            SystemMessage(content=_SYSTEM_PROMPT),
-            HumanMessage(content=user_content),
-        ])
-
-        try:
-            data = _parse_response(response.content)
-        except json.JSONDecodeError as e:
+            print(f"[saboteur] PHASE 1 FAILED: Could not generate tests")
+        return None, None
+    
+    test_cases = test_data.get("test_cases", [])
+    if len(test_cases) < 6:
+        if debug_mode:
+            print(f"[saboteur] PHASE 1 FAILED: Need at least 6 tests, got {len(test_cases)}")
+        return None, None
+    
+    if debug_mode:
+        print(f"[saboteur] PHASE 1 SUCCESS: Generated {len(test_cases)} tests")
+    
+    # Execute tests on ORIGINAL code to capture correct outputs
+    if debug_mode:
+        print(f"[saboteur] Executing tests on ORIGINAL code...")
+    original_results = _execute_tests_on_source(
+        current_source, 
+        surface_func_name, 
+        test_data,
+        file_path=file_path,
+        debug_mode=debug_mode
+    )
+    
+    # =====================================================================
+    # PHASE 2: INJECT BUG
+    # =====================================================================
+    attempted_bugs: list[str] = []
+    
+    for attempt in range(1, 4):
+        if debug_mode:
+            print(f"[saboteur] PHASE 2: Bug injection attempt {attempt}/3...")
+        
+        # Inject bug - GPT sees tests to make bug detectable
+        buggy_func_dict = _inject_bug_into_function(
+            func_source=func_source,
+            func_name=bug_func_name,
+            llm=llm,
+            attempted_bugs=attempted_bugs,
+            test_cases=test_cases,
+            original_results=original_results,
+            debug_mode=debug_mode
+        )
+        
+        if buggy_func_dict is None:
             if debug_mode:
-                print(f"[saboteur] JSON parse error: {e}")
+                print(f"[saboteur] Bug injection failed on attempt {attempt}")
             continue
-
-        sabotaged_func = data["sabotaged_function_code"]
-        # Track what bug was attempted so subsequent retries avoid repeating it
-        if desc := data.get("bug_description", ""):
-            attempted_bugs.append(desc)
-
-        # Splice back into current_source
+        
+        sabotaged_func = buggy_func_dict["sabotaged_function_code"]
+        bug_description = buggy_func_dict.get("bug_description", "")
+        
+        if bug_description:
+            attempted_bugs.append(bug_description)
+        
+        # Splice buggy function back into source
         lines = current_source.splitlines(keepends=True)
         candidate_source = "".join(lines[:start_line]) + sabotaged_func + "\n" + "".join(lines[end_line:])
-
+        
         # Validate syntax
         try:
             new_tree = ast.parse(candidate_source)
         except SyntaxError as e:
             if debug_mode:
-                print(f"[saboteur] Syntax error: {e}")
+                print(f"[saboteur] Syntax error in buggy code: {e}")
             continue
-
+        
         # Verify function name preserved
         new_names = {
             n.name for n in new_tree.body
@@ -624,23 +956,80 @@ def _sabotage_one_helper(
         }
         if bug_func_name not in new_names:
             if debug_mode:
-                print(f"[saboteur] GPT renamed '{bug_func_name}' — retrying")
+                print(f"[saboteur] Function '{bug_func_name}' was renamed — retrying")
             continue
-
-        # Reject if any new comment reveals the bug
+        
+        # Reject if comments reveal the bug
         if _has_revealing_comment(func_source, sabotaged_func):
             if debug_mode:
-                print(f"[saboteur] Comment reveals bug on attempt {attempt} — retrying")
+                print(f"[saboteur] Comment reveals bug — retrying")
             continue
-
-        # Attach debug metadata (not visible to student)
-        data["_debug_func_name"]   = bug_func_name
-        data["_debug_start_line"]  = start_line
-        data["_debug_end_line"]    = end_line
-        data["_debug_func_source"] = func_source
-        data["_debug_sabot_func"]  = sabotaged_func
-        return candidate_source, data
-
+        
+        # =====================================================================
+        # PHASE 3: VALIDATE BUG IS DETECTABLE
+        # =====================================================================
+        if debug_mode:
+            print(f"[saboteur] PHASE 3: Testing if bug is detectable...")
+        
+        buggy_results = _execute_tests_on_source(
+            candidate_source,
+            surface_func_name,
+            test_data,
+            file_path=file_path,
+            debug_mode=debug_mode
+        )
+        
+        # Count tests that detect the bug (different result)
+        detecting_tests = []
+        
+        for test_args_str in original_results:
+            if test_args_str not in buggy_results:
+                continue
+            
+            orig_success, orig_result = original_results[test_args_str]
+            buggy_success, buggy_result = buggy_results[test_args_str]
+            
+            # Bug detected if: success status changed OR result value changed
+            if orig_success != buggy_success or orig_result != buggy_result:
+                detecting_tests.append({
+                    "args": test_args_str, 
+                    "expected": orig_result
+                })
+                
+                if debug_mode:
+                    print(f"[saboteur]   Test DETECTS bug: {test_args_str}")
+        
+        total_tests = len(test_cases)
+        detecting_count = len(detecting_tests)
+        
+        if debug_mode:
+            print(f"[saboteur] Bug detected by {detecting_count}/{total_tests} tests")
+        
+        # SIMPLE VALIDATION: At least SOME tests must detect the bug
+        if detecting_count >= 1:
+            if debug_mode:
+                print(f"[saboteur] SUCCESS! Bug is detectable and we have {total_tests} tests total")
+            
+            # Return all tests - GPT and student interface will handle them
+            result_data = {
+                "test_cases": test_cases,  # All tests (detecting + passing)
+                "detecting_tests": detecting_tests,  # Which tests detect the bug
+                "bug_description": bug_description,
+                "_debug_func_name": bug_func_name,
+                "_debug_start_line": start_line,
+                "_debug_end_line": end_line,
+                "_debug_func_source": func_source,  # Original function
+                "_debug_sabot_func": sabotaged_func,  # Buggy function
+                "_debug_tests_summary": f"{detecting_count}/{total_tests} tests detect bug"
+            }
+            
+            return candidate_source, result_data
+        else:
+            if debug_mode:
+                print(f"[saboteur] REJECT: Bug not detected by any tests")
+    
+    if debug_mode:
+        print(f"[saboteur] All 3 attempts exhausted — no suitable bug found")
     return None, None
 
 
@@ -1269,586 +1658,467 @@ def {func_name}({param_str}):
     return updated_source, augmented
 
 
-def sabotage_init(state: ArchitectState) -> ArchitectState:
-    """Phase 1 - Target Selection: pick the function and inject the AI-resistant bug.
-
-    Runs the full file-scanning + bug-injection + test-case-verification loop.
-    Stores the bug-only (no structural transforms) sabotaged code in state so
-    downstream nodes (inflate_hierarchy, obfuscation passes) can build on top of it.
+def _pick_simple_functions(source: str, n_funcs: int, exclude: set[str] | None = None) -> list[str]:
     """
-    # Use nesting_level instead of difficulty_level
+    Pick n_funcs SIMPLE functions (standalone, doesn't matter if they call others).
+    These are depth-1 functions where we'll inject bugs directly.
+    Returns list of function names, or empty list if not enough functions found.
+    """
+    exclude = exclude or set()
+    tree = ast.parse(source)
+    
+    # Score all suitable functions
+    scored: list[tuple[int, str]] = []
+    
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name.startswith("__") or node.name.startswith("_"):
+            continue
+        if node.name.startswith("test"):
+            continue
+        if node.name in exclude:
+            continue
+        if node.end_lineno - node.lineno < 5:  # At least 5 lines
+            continue
+        
+        # Score based on complexity
+        score = 0
+        for child in ast.walk(node):
+            if isinstance(child, ast.Constant) and isinstance(child.value, (int, float, str)):
+                score += 2
+            if isinstance(child, (ast.For, ast.While)):
+                score += 3
+            if isinstance(child, ast.If):
+                score += 2
+            if isinstance(child, ast.Return):
+                score += 2
+            if isinstance(child, ast.BinOp):
+                score += 2
+            if isinstance(child, ast.ListComp):
+                score += 3
+            if isinstance(child, ast.Compare):
+                score += 1
+            if isinstance(child, ast.Attribute):
+                score -= 1  # Discourage class methods
+        
+        if score > 0:
+            scored.append((score, node.name))
+    
+    if len(scored) < n_funcs:
+        return []  # Not enough functions
+    
+    # Sort by score and take top candidates
+    scored.sort(key=lambda x: x[0], reverse=True)
+    # Take diverse candidates (not just top 3)
+    candidates = scored[:min(n_funcs * 3, len(scored))]
+    random.shuffle(candidates)
+    return [name for _, name in candidates[:n_funcs]]
+
+
+def saboteur_init(state: ArchitectState) -> ArchitectState:
+    """
+    NEW SIMPLE WORKFLOW:
+    1. Pick num_bugs SIMPLE functions (depth 1 - standalone functions)
+    2. For each function:
+       a. Generate 6+ tests FOR THAT FUNCTION DIRECTLY (function is its own surface)
+       b. Inject bug INTO THAT FUNCTION
+       c. Verify tests detect the bug (at least 3 tests must detect it)
+    3. Save all buggy functions with their tests
+    4. Later: inflation pass will add wrapper layers around each buggy function
+    
+    This approach ensures tests and bugs are created for the SAME function,
+    avoiding the call-chain disconnect problem.
+    """
     target_nesting = state["nesting_level"]
     debug_mode = state.get("debug_mode", False)
-    instructions = _BUG_INJECTION_INSTRUCTION  # Same instruction for all
+    n_bugs = max(1, state.get("num_bugs") or 1)
 
-    n_bugs    = max(1, state.get("num_bugs") or 1)
-    max_depth = target_nesting  # Use the requested nesting level
-
-    candidate_files: list[str] = list(state.get("candidate_files") or [state["target_file"]])
-    tried_files: set[str] = set()
-
-    max_outer_attempts = 5  # Increased from 3 to give more chances
-    total_attempts = 0
-    max_total_attempts = 15  # Safety limit to prevent infinite loops
+    candidate_files = list(state.get("candidate_files") or [state["target_file"]])
+    random.shuffle(candidate_files)  # Randomize file selection order
     
-    while candidate_files and total_attempts < max_total_attempts:
-        current_file = candidate_files.pop(0)
-        if current_file in tried_files:
-            continue
-        tried_files.add(current_file)
-
-        with open(current_file, encoding="utf-8", errors="ignore") as _f:
-            source = _f.read()
-
+    if debug_mode:
+        print(f"\n[saboteur_init] === NEW SIMPLE WORKFLOW ===")
+        print(f"[saboteur_init] Requested bugs: {n_bugs}")
+        print(f"[saboteur_init] Target nesting: {target_nesting}")
+        print(f"[saboteur_init] Trying {len(candidate_files)} candidate files in random order")
+    
+    # Initialize data structures for collecting bugs across all files
+    llm = ChatOpenAI(model="gpt-4o", temperature=0.7)
+    all_bugs_data = []
+    bug_specific_tests = {}  # {func_name: [test cases that detect this bug]}
+    successful_funcs = []  # Track which functions actually got bugs
+    combined_source = None  # Will hold the modified source code
+    target_file_path = None  # Will hold the file where bugs were injected
+    
+    # Try each candidate file
+    for current_file in candidate_files:
+        if len(all_bugs_data) >= n_bugs:
+            break  # We already have enough bugs from previous files
+            
+        with open(current_file, encoding="utf-8", errors="ignore") as f:
+            source = f.read()
+        
         if debug_mode:
-            print(f"[sabotage_init] Trying file: {current_file}")
-        all_previous_bugs: list[str] = []
-        tried_surfaces: set[str] = set()
-
-        for outer in range(1, max_outer_attempts + 1):
-            total_attempts += 1
-            if total_attempts > max_total_attempts:
-                if debug_mode:
-                    print(f"[sabotage_init] Reached maximum total attempts ({max_total_attempts}) -- giving up")
-                break
-                
-            try:
-                surface_func_name, module_func_nodes = _pick_surface_function(
-                    source, max_depth, exclude=tried_surfaces
-                )
-            except ValueError as e:
-                print(f"[sabotage_init] No usable function in {current_file}: {e} -- trying next file.")
-                break
-            tried_surfaces.add(surface_func_name)
-            call_graph = _build_call_graph(module_func_nodes)
-
-            # Find reachable functions (those in the call graph)
-            reachable = _find_reachable(call_graph, surface_func_name, max_depth)
-            
-            # Important: Include ALL functions that are large enough, not just reachable ones
-            # Because we can use _augment_chain_depth to add wrapper functions later!
-            # This allows us to inject bugs into ANY function and then build the required nesting
-            all_candidates = {
-                h: reachable.get(h, 0)  # Use existing depth if reachable, otherwise 0 (direct call)
-                for h, node in module_func_nodes.items()
-                if h != surface_func_name  # Don't include the surface function itself
-                and node.end_lineno - node.lineno >= 3  # Minimum 3 lines
-            }
-            
-            # substantial now includes ALL functions, even direct ones (depth 0)
-            substantial = all_candidates
-
-            indirect_mode = bool(substantial)
-            if substantial:
-                max_avail = max(substantial.values()) if substantial.values() else 0
-                
-                # NEW DYNAMIC DEPTH STRATEGY:
-                # We pick functions from ANY depth (including 0 = direct call)
-                # and use _augment_chain_depth to build the required nesting level.
-                # This maximizes the number of available functions for bug injection!
-                
-                # Collect candidates from all depths (including depth 0)
-                depth_pools = {}
-                for h, d in substantial.items():
-                    if d not in depth_pools:
-                        depth_pools[d] = []
-                    depth_pools[d].append(h)
-                
-                # Weighted selection: prefer deeper chains but allow shallower ones too
-                # 60% chance for deep chains (>= max_depth-1), 40% for shallower (including depth 0)
-                use_deep = random.random() < 0.6
-                
-                if debug_mode:
-                    print(f"[sabotage_init] Number of substantial functions available: {len(substantial)}")
-                    print(f"[sabotage_init] Depth distribution: {dict((d, len(funcs)) for d, funcs in depth_pools.items())}")
-                    print(f"[sabotage_init] Requested bugs: {n_bugs}, Selection mode: {'deep' if use_deep else 'shallow'}")
-                
-                bug_targets = []
-                if use_deep and max_avail >= max_depth - 1:
-                    # Prefer deep chains - collect from multiple depths if needed
-                    for target_depth in range(max_avail, max(1, max_depth - 2), -1):
-                        if len(bug_targets) >= n_bugs:
-                            break  # We have enough bugs
-                        
-                        if target_depth in depth_pools:
-                            pool = depth_pools[target_depth]
-                            verified_pool = []
-                            for candidate in pool:
-                                test_path = _find_call_path(call_graph, surface_func_name, candidate, max_depth)
-                                if len(test_path) - 1 == target_depth:
-                                    verified_pool.append((candidate, test_path))
-                            
-                            if verified_pool:
-                                # Take as many as we still need
-                                needed = n_bugs - len(bug_targets)
-                                selected = random.sample(verified_pool, min(needed, len(verified_pool)))
-                                bug_targets.extend([(cand, path) for cand, path in selected])
-                else:
-                    # Pick from shallower depths and augment them - collect from multiple depths
-                    # Now includes depth 0 (direct functions) since we can augment any function!
-                    candidate_depths = sorted(depth_pools.keys())
-                    for target_depth in candidate_depths:
-                        if len(bug_targets) >= n_bugs:
-                            break  # We have enough bugs
-                        
-                        # Accept ALL depths (including 0) - augmentation will handle creating the nesting
-                        pool = depth_pools[target_depth]
-                        if pool:
-                            needed = n_bugs - len(bug_targets)
-                            selected_funcs = random.sample(pool, min(needed, len(pool)))
-                            for func in selected_funcs:
-                                # Try to find an existing path, or create a direct one
-                                try:
-                                    path = _find_call_path(call_graph, surface_func_name, func, max_depth)
-                                except:
-                                    # If no path found, create a direct path (depth 0)
-                                    path = [surface_func_name, func]
-                                bug_targets.append((func, path))
-                            # Continue to next depth if we still need more
-                
-                # If no targets selected, fall back to any substantial function
-                if not bug_targets:
-                    pool = list(substantial.keys())
-                    selected_funcs = random.sample(pool, min(n_bugs, len(pool)))
-                    if debug_mode:
-                        print(f"[sabotage_init] Fallback: selecting {len(selected_funcs)} bugs from {len(pool)} substantial functions")
-                    bug_targets = []
-                    for func in selected_funcs:
-                        try:
-                            path = _find_call_path(call_graph, surface_func_name, func, max_depth)
-                        except:
-                            # If no path exists, create a direct path - augmentation will add the nesting
-                            path = [surface_func_name, func]
-                        bug_targets.append((func, path))
-                
-                # If we still don't have enough bugs, try to get more from any available depth
-                if len(bug_targets) < n_bugs and len(bug_targets) > 0:
-                    if debug_mode:
-                        print(f"[sabotage_init] Only found {len(bug_targets)}/{n_bugs} bugs, trying to add more from other depths...")
-                    
-                    # Get all functions not already selected
-                    already_selected = {func for func, _ in bug_targets}
-                    remaining_pool = [f for f in substantial.keys() if f not in already_selected]
-                    
-                    if remaining_pool:
-                        needed = n_bugs - len(bug_targets)
-                        additional = random.sample(remaining_pool, min(needed, len(remaining_pool)))
-                        for func in additional:
-                            try:
-                                path = _find_call_path(call_graph, surface_func_name, func, max_depth)
-                            except:
-                                # If no path exists, create a direct path
-                                path = [surface_func_name, func]
-                            bug_targets.append((func, path))
-                        
-                        if debug_mode:
-                            print(f"[sabotage_init] Added {len(additional)} more bugs from remaining pool, total now: {len(bug_targets)}")
-                
-                # CRITICAL: If still not enough bugs, inject multiple bugs in the same functions
-                # This is actually MORE challenging for students!
-                if len(bug_targets) < n_bugs and len(bug_targets) > 0:
-                    needed = n_bugs - len(bug_targets)
-                    if debug_mode:
-                        print(f"[sabotage_init] Still need {needed} more bug(s). Will inject multiple bugs into existing functions.")
-                    
-                    # Duplicate existing targets to reach the required number
-                    # Prefer functions with higher depth (more interesting)
-                    sorted_targets = sorted(bug_targets, key=lambda x: len(x[1]), reverse=True)
-                    for i in range(needed):
-                        # Cycle through targets to distribute bugs evenly
-                        target_to_duplicate = sorted_targets[i % len(sorted_targets)]
-                        bug_targets.append(target_to_duplicate)
-                        if debug_mode:
-                            func_name = target_to_duplicate[0]
-                            print(f"[sabotage_init] Adding additional bug to function '{func_name}'")
-                
-                if debug_mode:
-                    print(f"[sabotage_init] FINAL: Selected {len(bug_targets)} bug injection(s) (requested {n_bugs})")
-                    unique_funcs = len(set(func for func, _ in bug_targets))
-                    if unique_funcs < len(bug_targets):
-                        print(f"[sabotage_init] Note: {len(bug_targets)} bugs distributed across {unique_funcs} functions (multiple bugs per function)")
-                
-                # Now augment chains that are too short
-                augmented_targets = []
-                for bug_func, original_chain in bug_targets:
-                    current_depth = len(original_chain) - 1
-                    if current_depth < max_depth:
-                        # Augment this chain!
-                        if debug_mode:
-                            print(f"[sabotage_init] Augmenting chain to '{bug_func}' from depth {current_depth} to {max_depth}")
-                        try:
-                            source, augmented_chain = _augment_chain_depth(
-                                source, original_chain, max_depth, module_func_nodes
-                            )
-                            # Re-parse to update module_func_nodes
-                            tree = ast.parse(source)
-                            for node in tree.body:
-                                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                                    if node.name not in module_func_nodes:
-                                        module_func_nodes[node.name] = node
-                            # Rebuild call graph with new functions
-                            call_graph = _build_call_graph(module_func_nodes)
-                            augmented_targets.append((bug_func, augmented_chain))
-                            if debug_mode:
-                                print(f"[sabotage_init]   Augmented chain: {' -> '.join(augmented_chain)}")
-                        except Exception as e:
-                            if debug_mode:
-                                print(f"[sabotage_init]   Augmentation failed: {e}, using original chain")
-                            augmented_targets.append((bug_func, original_chain))
-                    else:
-                        augmented_targets.append((bug_func, original_chain))
-                
-                # Extract just the function names and chains
-                bug_targets = [func for func, _ in augmented_targets]
-                bug_chains: dict[str, list[str]] = {
-                    func: chain for func, chain in augmented_targets
-                }
-            else:
-                bug_targets = [surface_func_name]
-                bug_chains: dict[str, list[str]] = {
-                    surface_func_name: [surface_func_name]
-                }
-
+            print(f"\n[saboteur_init] Trying file: {current_file}")
+        
+        # Calculate how many more bugs we need
+        remaining_bugs = n_bugs - len(all_bugs_data)
+        
+        # Pick candidate functions (we may not succeed with all)
+        candidate_funcs = _pick_simple_functions(source, remaining_bugs * 3)
+        
+        if not candidate_funcs:
             if debug_mode:
-                print(f"[sabotage_init] Outer attempt {outer}: surface='{surface_func_name}', "
-                      f"bug_targets={bug_targets}, max_depth={max_depth}, indirect={indirect_mode}")
-                print(f"[sabotage_init] Number of bugs requested: {n_bugs}, Number of targets selected: {len(bug_targets)}")
-                for t, chain in bug_chains.items():
-                    print(f"[sabotage_init]   chain to '{t}': {' -> '.join(chain)} (depth {len(chain)-1})")
-
-            surface_source = ""
-            if indirect_mode:
-                surface_source, _, _ = _extract_function_source(source, surface_func_name)
-
-            llm = ChatOpenAI(model="gpt-4o", temperature=0.7)
-
-            bug_targets_sorted = sorted(
-                bug_targets,
-                key=lambda h: module_func_nodes[h].lineno,
-                reverse=True,
+                print(f"[saboteur_init] No suitable functions in {current_file}")
+            continue
+        
+        if debug_mode:
+            print(f"[saboteur_init] Found {len(candidate_funcs)} candidate functions, need {remaining_bugs} more bugs")
+        
+        current_source = combined_source if combined_source else source
+        
+        # Try injecting bugs in candidate functions until we have n_bugs successes
+        for func_name in candidate_funcs:
+            if len(all_bugs_data) >= n_bugs:
+                break  # We have enough bugs
+                
+            bug_index = len(all_bugs_data) + 1
+            if debug_mode:
+                print(f"\n[saboteur_init] === BUG {bug_index}/{n_bugs}: {func_name} ===")
+            
+            source_before_bug = current_source
+            
+            # Call _sabotage_one_helper in DIRECT mode
+            # (function is its own surface - no call chain)
+            new_source, data = _sabotage_one_helper(
+                bug_func_name=func_name,
+                current_source=current_source,
+                surface_func_name=func_name,  # Same function!
+                surface_source="",  # Not needed in direct mode
+                instructions=_BUG_INJECTION_SYSTEM_PROMPT,
+                llm=llm,
+                indirect_mode=False,  # DIRECT MODE
+                call_chain=[func_name],
+                previous_bugs=[],
+                target_nesting=target_nesting,
+                file_path=current_file,
+                debug_mode=debug_mode
             )
-
-            current_source = source
-            all_descriptions: list[str] = []
-            all_data: list[dict] = []
-            last_data: dict | None = None
-
-            if debug_mode:
-                print(f"[sabotage_init] Starting bug injection for {len(bug_targets_sorted)} bugs")
-
-            for bug_func_name in bug_targets_sorted:
-                new_source, data = _sabotage_one_helper(
-                    bug_func_name, current_source,
-                    surface_func_name, surface_source,
-                    instructions, llm, indirect_mode,
-                    call_chain=bug_chains.get(bug_func_name),
-                    previous_bugs=list(all_previous_bugs),
-                    target_nesting=target_nesting,
-                    debug_mode=debug_mode,
-                )
-                if new_source is None:
-                    if debug_mode:
-                        print(f"[sabotage_init] Failed to sabotage '{bug_func_name}' -- skipping this bug and continuing")
-                    continue  # Skip this bug, try next one
-                
-                current_source = new_source
-                all_descriptions.append(data["bug_description"])
-                all_data.append(data)
-                last_data = data
-                if debug_mode:
-                    print(f"[sabotage_init] Successfully injected bug #{len(all_data)} into '{bug_func_name}'")
-                if desc := data.get("bug_description", ""):
-                    all_previous_bugs.append(desc)
-
-            # Check if we successfully injected at least one bug
-            if not all_data or last_data is None:
-                if debug_mode:
-                    print(f"[sabotage_init] All {len(bug_targets_sorted)} bug injections failed -- retrying outer loop")
-                continue
-
-            # MERGE test cases from ALL bugs (not just last one!)
-            # This ensures every bug is covered by its own tests
-            raw_public_cases = []
-            raw_secret_cases = []
             
-            for bug_data in all_data:
-                # Get test cases from this bug
-                bug_public = bug_data.get("test_cases_public", [])
-                bug_secret = bug_data.get("test_cases_secret", [])
-                
-                # Fallback: if old format, split the test_cases
-                if not bug_public and not bug_secret:
-                    raw_all = bug_data.get("test_cases", [])
-                    mid = len(raw_all) // 2
-                    bug_public = raw_all[:mid] if mid > 0 else raw_all
-                    bug_secret = raw_all[mid:] if mid > 0 else []
-                
-                raw_public_cases.extend(bug_public)
-                raw_secret_cases.extend(bug_secret)
-            
-            if not raw_public_cases and not raw_secret_cases:
+            if new_source is None:
                 if debug_mode:
-                    print("[sabotage_init] GPT returned no test cases from any bug -- retrying outer loop")
+                    print(f"[saboteur_init] Failed to inject bug in {func_name}, skipping")
                 continue
             
-            if debug_mode:
-                print(f"[sabotage_init] Collected {len(raw_public_cases)} public + {len(raw_secret_cases)} secret test cases from {len(all_data)} bug(s)")
-
-            # Verify public tests (simpler, for development)
-            verified_public: list[dict] = []
-            public_failing_count = 0
-            for tc in raw_public_cases:
-                args = tc.get("args", "()")
-                if "lambda" in args or "range(" in args or "<function" in args:
-                    continue
-                try:
-                    eval(args, {"__builtins__": {}})
-                except:
-                    continue
-
-                orig_ok, true_exp = _try_exec(source, surface_func_name, args, file_path=current_file)
-                if not orig_ok:
-                    continue
-                try:
-                    eval(true_exp, {"__builtins__": __builtins__})
-                except:
-                    continue
-
-                sabot_ok, true_act = _try_exec(current_source, surface_func_name, args, file_path=current_file)
-                if not sabot_ok:
-                    continue
-
-                verified_public.append({"args": args, "expected": true_exp})
-                if true_exp != true_act:
-                    public_failing_count += 1
+            # Get tests from data
+            test_cases = data.get("test_cases", [])
             
-            # Verify secret tests (harder, for final validation)  
-            verified_secret: list[dict] = []
-            secret_failing_count = 0
-            first_fail_args = first_expected = first_actual = None
-            exec_possible = False
-            
-            for tc in raw_secret_cases:
+            # Count how many tests detect THIS bug
+            detecting_tests = []
+            for tc in test_cases:
                 args = tc.get("args", "()")
-                if "lambda" in args or "range(" in args or "<function" in args:
+                
+                # Skip invalid tests
+                if "lambda" in args or "range(" in args:
                     continue
                 try:
                     eval(args, {"__builtins__": {}})
                 except:
                     continue
                 
-                orig_ok, true_exp = _try_exec(source, surface_func_name, args, file_path=current_file)
-                if not orig_ok:
+                # Run on BEFORE and AFTER
+                before_ok, before_result = _try_exec(source_before_bug, func_name, args, current_file)
+                after_ok, after_result = _try_exec(new_source, func_name, args, current_file)
+                
+                # Test detects bug if results differ
+                if before_ok != after_ok or (before_ok and after_ok and before_result != after_result):
+                    detecting_tests.append({
+                        "args": args,
+                        "expected": before_result if before_ok else before_result
+                    })
+            
+            num_detecting = len(detecting_tests)
+            
+            if debug_mode:
+                print(f"[saboteur_init] Bug in '{func_name}': {num_detecting}/{len(test_cases)} tests detect it")
+            
+            # Validate: need at least 1 detecting test (changed from 3)
+            if num_detecting < 1:
+                if debug_mode:
+                    print(f"[saboteur_init] No tests detect this bug, skipping")
+                continue
+            
+            # Bug is good! Save ALL test cases (not just detecting ones)
+            current_source = new_source
+            
+            # Add function_name to bug data
+            data["function_name"] = func_name
+            all_bugs_data.append(data)
+            
+            # Store ALL test cases (both detecting and passing)
+            # This gives students a mix of passing/failing tests
+            all_tests_with_expected = []
+            for tc in test_cases:
+                args = tc.get("args", "()")
+                # Skip invalid tests
+                if "lambda" in args or "range(" in args:
                     continue
                 try:
-                    eval(true_exp, {"__builtins__": __builtins__})
+                    eval(args, {"__builtins__": {}})
                 except:
                     continue
-                
-                sabot_ok, true_act = _try_exec(current_source, surface_func_name, args, file_path=current_file)
-                if not sabot_ok:
-                    continue
-                
-                exec_possible = True
-                verified_secret.append({"args": args, "expected": true_exp})
-                
-                if true_exp != true_act:
-                    secret_failing_count += 1
-                    if first_fail_args is None:
-                        first_fail_args, first_expected, first_actual = args, true_exp, true_act
+                # Get expected result from original (non-buggy) code
+                before_ok, before_result = _try_exec(source_before_bug, func_name, args, current_file)
+                if before_ok:
+                    all_tests_with_expected.append({
+                        "args": args,
+                        "expected": before_result
+                    })
             
-            # Also check public tests for failures
-            if first_fail_args is None:
-                for tc in verified_public:
-                    _, act = _try_exec(current_source, surface_func_name, tc["args"], file_path=current_file)
-                    if tc["expected"] != act:
-                        first_fail_args = tc["args"]
-                        first_expected = tc["expected"]
-                        first_actual = act
-                        break
-
-            # Combine for total verification
-            verified_cases = verified_public + verified_secret
-
-            if not exec_possible and not verified_public:
-                if debug_mode:
-                    print("[sabotage_init] Bug produces crashes instead of wrong values -- retrying outer loop.")
-                continue
-
-            if first_fail_args is None:
-                if debug_mode:
-                    print("[sabotage_init] No test case exposes the bug after exec -- retrying outer loop")
-                continue
-
-            if public_failing_count < 2:
-                if debug_mode:
-                    print(f"[sabotage_init] Only {public_failing_count} public tests fail on sabotaged code "
-                          f"(need >= 2) -- retrying outer loop")
-                continue
-
-            # Ensure enough secret tests fail (at least 2 out of the secret tests)
-            if secret_failing_count < 2:
-                if debug_mode:
-                    print(f"[sabotage_init] Only {secret_failing_count} secret tests fail on sabotaged code "
-                          f"(need >= 2) -- retrying outer loop")
-                continue
-
-            # Ensure overall failure rate is significant (at least 30% of all tests should fail)
-            total_failing = public_failing_count + secret_failing_count
-            total_tests = len(verified_public) + len(verified_secret)
-            failure_rate = total_failing / total_tests if total_tests > 0 else 0
+            bug_specific_tests[func_name] = all_tests_with_expected
+            successful_funcs.append(func_name)
             
-            if failure_rate < 0.30:
-                if debug_mode:
-                    print(f"[sabotage_init] Only {total_failing}/{total_tests} tests fail ({failure_rate:.1%}) "
-                          f"(need >= 30%) -- retrying outer loop")
-                continue
-
-            if debug_mode:
-                print(f"[sabotage_init] Verified {len(verified_public)} public tests ({public_failing_count} fail) and "
-                      f"{len(verified_secret)} secret tests ({secret_failing_count} fail); "
-                      f"overall failure rate: {failure_rate:.1%}")
-                print(f"[sabotage_init] First failing: {first_fail_args} -> expected={first_expected}, got={first_actual}")
-
-            # Use the public/secret split from AI generation
-            public_tests = verified_public
-            secret_tests = verified_secret
+            # Update combined source and target file
+            combined_source = current_source
+            if target_file_path is None:
+                target_file_path = current_file
             
             if debug_mode:
-                print(f"[sabotage_init] Using AI-generated split: {len(public_tests)} public tests (simpler), "
-                      f"{len(secret_tests)} secret tests (harder edge cases)")
-
-            state["target_file"]     = current_file
-            state["original_code"]   = source
-            state["sabotaged_code"]  = current_source   # bug-only, no structural transforms yet
-            state["function_name"]   = surface_func_name
-            state["test_args"]       = first_fail_args
-            state["expected_output"] = first_expected
-            state["actual_output"]   = first_actual
-            state["test_cases"]      = verified_cases  # All test cases
-            state["public_tests"]    = public_tests     # First 5 (for students to see)
-            state["secret_tests"]    = secret_tests     # Last 5 (hidden until final submission)
-            state["bug_description"] = " | ".join(all_descriptions)
-            state["bug_func_name"]          = all_data[0]["_debug_func_name"]   if all_data else ""
-            state["bug_func_source"]        = all_data[0]["_debug_sabot_func"]  if all_data else ""
-            state["original_bug_func_source"] = all_data[0]["_debug_func_source"] if all_data else ""
-            state["all_bug_data"]           = all_data  # Store all bug data for misleading comments
-            
-            # Store the call chain for debugging and documentation
-            # Format: {bug_function_name: [surface_func, ..., bug_func]}
-            state["call_chain"] = bug_chains
-
-            if debug_mode:
-                print(f"\n[sabotage_init] Surface: {surface_func_name}")
-                print(f"[sabotage_init] Bug(s): {state['bug_description']}")
-                print("\n" + "=" * 70)
-                print("CALL CHAIN VISUALIZATION (for debugging)")
-                print("=" * 70)
-                for t in bug_targets:
-                    chain = bug_chains.get(t, [surface_func_name, t])
-                    depth = len(chain) - 1
-                    print(f"\nBug Location: {t} (Depth: {depth})")
-                    print("Call Path:")
-                    for i, func in enumerate(chain):
-                        indent = "  " * i
-                        if i == 0:
-                            marker = "┌─"
-                        elif i == len(chain) - 1:
-                            marker = "└─"
-                        else:
-                            marker = "├─"
-                        
-                        if i == len(chain) - 1:
-                            print(f"{indent}{marker}> {func}  ⚠️ BUG HERE")
-                        else:
-                            print(f"{indent}{marker}> {func}")
-                            if i < len(chain) - 1:
-                                print(f"{indent}│")
-                print("\n" + "=" * 70 + "\n")
-            
-            # Generate detailed explanation for instructor
-            detailed_parts = []
-            detailed_parts.append("=" * 80)
-            detailed_parts.append("DETAILED EXPLANATION FOR INSTRUCTOR")
-            detailed_parts.append("=" * 80)
-            detailed_parts.append(f"\nTarget File: {current_file}")
-            detailed_parts.append(f"Surface Function: {surface_func_name}")
-            detailed_parts.append(f"Number of Bugs: {len(bug_targets)}")
-            detailed_parts.append(f"\nBug Locations:")
-            for t in bug_targets:
-                chain = bug_chains.get(t, [surface_func_name, t])
-                detailed_parts.append(f"  - Function: {t}")
-                detailed_parts.append(f"    Call Chain: {' -> '.join(chain)}")
-                detailed_parts.append(f"    Depth: {len(chain) - 1}")
-            detailed_parts.append(f"\nBug Description: {state['bug_description']}")
-            detailed_parts.append(f"\nFirst Failing Test:")
-            detailed_parts.append(f"  Args: {first_fail_args}")
-            detailed_parts.append(f"  Expected: {first_expected}")
-            detailed_parts.append(f"  Actual: {first_actual}")
-            detailed_parts.append(f"\nTest Case Summary:")
-            detailed_parts.append(f"  Total verified: {len(verified_cases)}")
-            detailed_parts.append(f"  Public tests: {len(public_tests)}")
-            detailed_parts.append(f"  Secret tests: {len(secret_tests)}")
-            detailed_parts.append("\n" + "=" * 80)
-            state["detailed_explanation"] = "\n".join(detailed_parts)
-
-            # Print detailed diff only in debug mode
-            if state.get("debug_mode", False):
-                print(f"\n[sabotage_init] Displaying diffs for {len(all_data)} bug(s):")
-                for idx, target_data in enumerate(all_data, 1):
-                    print(f"\n[sabotage_init] === Bug #{idx}/{len(all_data)} ===")
-                    diff_str = _format_bug_diff(
-                        func_name        = target_data["_debug_func_name"],
-                        file_start_line  = target_data["_debug_start_line"],
-                        file_end_line    = target_data["_debug_end_line"],
-                        original_source  = target_data["_debug_func_source"],
-                        sabotaged_source = target_data["_debug_sabot_func"],
-                    )
-                    print(diff_str)
-
-            # Success! We have at least one bug injected
-            # Note: We might have fewer bugs than requested if some injections failed,
-            # but that's OK - we tried our best with this file
-            if debug_mode and len(all_data) < n_bugs:
-                print(f"\n[sabotage_init] Note: Successfully injected {len(all_data)}/{n_bugs} bugs")
-                print(f"[sabotage_init] (Some bug injections may have failed verification)")
-            
-            return state
-
-        else:
-            print(f"[sabotage_init] All {max_outer_attempts} attempts failed for "
-                  f"{current_file} -- trying next file.")
-
-    # If we get here, no file worked
-    error_msg = (
-        f"Failed to inject bug after {total_attempts} attempts across {len(tried_files)} file(s). "
-        f"Possible reasons:\n"
-        f"  - Functions require complex imports/globals that cannot be exec-tested in isolation\n"
-        f"  - Bug injection failed to produce tests with sufficient failure rate (need 2+ public, 2+ secret, 30%+ overall)\n"
-        f"  - Try a repo with simpler standalone utility functions (e.g. math helpers, string processors)\n"
-        f"Files tried: {', '.join(tried_files)}"
-    )
-    raise RuntimeError(error_msg)
+                print(f"[saboteur_init] ✓ Bug #{bug_index} injected - {len(all_tests_with_expected)} total tests ({num_detecting} detecting)")
+    
+    # Check if we got enough bugs across all files
+    if len(all_bugs_data) < n_bugs:
+        if debug_mode:
+            print(f"[saboteur_init] Only got {len(all_bugs_data)}/{n_bugs} bugs across {len(candidate_files)} files")
+        raise RuntimeError(f"Failed to inject {n_bugs} bugs (only got {len(all_bugs_data)}) in {len(candidate_files)} candidate files")
+    
+    if debug_mode:
+        print(f"\n[saboteur_init] === SUCCESS: {len(all_bugs_data)}/{n_bugs} bugs injected ===")
+        print(f"[saboteur_init] Total tests: {sum(len(tests) for tests in bug_specific_tests.values())}")
+        for func_name, tests in bug_specific_tests.items():
+            print(f"[saboteur_init]   - {func_name}: {len(tests)} tests")
+        
+    # Get first failing test for display (from first bug)
+    first_fail_args = first_expected = first_actual = None
+    if all_bugs_data and bug_specific_tests:
+        first_func = all_bugs_data[0]["function_name"]
+        first_tests = bug_specific_tests.get(first_func, [])
+        for tc in first_tests:
+            args = tc.get("args", "()")
+            expected = tc.get("expected")
+            _, actual = _try_exec(combined_source, first_func, args, target_file_path)
+            if expected != actual:
+                first_fail_args, first_expected, first_actual = args, expected, actual
+                break
+    
+    # Build bug description
+    bug_descriptions = [d.get("bug_description", "") for d in all_bugs_data]
+    combined_desc = " | ".join(bug_descriptions)
+    
+    # Read original source from the target file
+    with open(target_file_path, encoding="utf-8", errors="ignore") as f:
+        original_source = f.read()
+    
+    # Save to state
+    state["target_file"] = target_file_path
+    state["original_code"] = original_source
+    state["sabotaged_code"] = combined_source
+    state["function_name"] = successful_funcs[0] if successful_funcs else "unknown"  # First function as surface
+    state["test_args"] = first_fail_args or "()"
+    state["expected_output"] = first_expected or ""
+    state["actual_output"] = first_actual or ""
+    state["bug_description"] = combined_desc
+    state["all_bug_data"] = all_bugs_data
+    state["bug_specific_tests"] = bug_specific_tests  # For deployment - tests per bug
+    state["sabotaged_functions"] = successful_funcs  # List of functions with bugs
+    
+    # Store original buggy function source for inflation
+    if all_bugs_data:
+        state["bug_func_name"] = all_bugs_data[0].get("_debug_func_name", successful_funcs[0] if successful_funcs else "unknown")
+        state["bug_func_source"] = all_bugs_data[0].get("_debug_sabot_func", "")
+        state["original_bug_func_source"] = all_bugs_data[0].get("_debug_func_source", "")
+    
+    if debug_mode:
+        total_tests = sum(len(tests) for tests in bug_specific_tests.values())
+        print(f"\n[saboteur_init] === COMPLETE ===")
+        print(f"[saboteur_init] File: {target_file_path}")
+        print(f"[saboteur_init] Bugs: {successful_funcs}")
+        print(f"[saboteur_init] Description: {combined_desc}")
+        print(f"[saboteur_init] Tests: {total_tests} total ({len(all_bugs_data)} bugs)")
+    
+    return state
 
 
 def inflate_hierarchy(state: ArchitectState) -> ArchitectState:
-    """Phase 2 - Hierarchy Inflation: inflate ALL functions in the call chain to make debugging harder.
+    """Phase 2 - Hierarchy Inflation: Add wrapper layers around buggy functions.
 
-    This inflates ONLY the functions in the actual call path from surface to bug location.
-    Each function in the chain is expanded with dummy code, redundant operations, and busy-work
-    to make it very difficult to spot where the bug actually is.
-
-    Uses readable names so downstream refactoring passes can apply their own conventions.
+    NEW WORKFLOW: For depth-1 functions, adds N wrapper layers around each buggy function.
+    OLD WORKFLOW: Inflates functions in call chains.
     """
     source = state["sabotaged_code"]
     debug_mode = state.get("debug_mode", False)
+    nesting_level = state.get("nesting_level", 1)
+    
+    # Check if this is NEW workflow (simple depth-1 functions with wrappers)
+    sabotaged_functions = state.get("sabotaged_functions", [])
+    
+    if debug_mode:
+        print(f"[inflate_hierarchy] sabotaged_functions = {sabotaged_functions}")
+    
+    if sabotaged_functions:
+        if debug_mode:
+            print(f"[inflate_hierarchy] NEW WORKFLOW: Adding {nesting_level} wrapper layers to {len(sabotaged_functions)} functions")
+        
+        # For each buggy function, create N wrappers
+        current_source = source
+        wrapper_mapping = {}  # Track {original_func: outermost_wrapper_name}
+        
+        # Random name components for generating realistic function names
+        prefixes = ['process', 'handle', 'execute', 'validate', 'transform', 'normalize', 
+                    'compute', 'evaluate', 'analyze', 'parse', 'generate', 'resolve',
+                    'prepare', 'apply', 'check', 'verify', 'build', 'create']
+        middles = ['data', 'input', 'output', 'result', 'value', 'entry', 'item',
+                   'record', 'element', 'content', 'buffer', 'state', 'context']
+        suffixes = ['pipeline', 'handler', 'validator', 'transformer', 'processor',
+                    'analyzer', 'builder', 'manager', 'controller', 'helper',
+                    'utility', 'filter', 'mapper', 'wrapper']
+        
+        for func_name in sabotaged_functions:
+            if debug_mode:
+                print(f"[inflate_hierarchy] Creating wrappers for '{func_name}'...")
+            
+            try:
+                # Extract the original buggy function signature
+                func_source, start_line, end_line = _extract_function_source(current_source, func_name)
+                tree = ast.parse(func_source)
+                func_node = tree.body[0]
+                
+                # Get function signature details
+                args_list = []
+                for arg in func_node.args.args:
+                    args_list.append(arg.arg)
+                
+                # Build argument string for calls: "arg1, arg2, arg3"
+                args_str = ", ".join(args_list)
+                
+                # Generate random wrapper names (avoid collisions)
+                wrapper_names = []
+                used_names = set()
+                for level in range(nesting_level):
+                    while True:
+                        name = f"{random.choice(prefixes)}_{random.choice(middles)}_{random.choice(suffixes)}"
+                        if name not in used_names:
+                            wrapper_names.append(name)
+                            used_names.add(name)
+                            break
+                
+                # wrapper_names[0] is outermost, wrapper_names[-1] is innermost
+                wrappers = []
+                
+                # Create wrapper chain: wrappers[0] -> wrappers[1] -> ... -> original_func
+                for level in range(nesting_level):
+                    wrapper_name = wrapper_names[level]
+                    
+                    # The innermost wrapper calls the original function
+                    if level == nesting_level - 1:
+                        next_call = f"{func_name}({args_str})"
+                    else:
+                        # Other wrappers call the next wrapper down
+                        next_wrapper = wrapper_names[level + 1]
+                        next_call = f"{next_wrapper}({args_str})"
+                    
+                    # Build wrapper function with padding
+                    wrapper_code = f"""def {wrapper_name}({", ".join(args_list)}):
+    \"\"\"Helper function for data processing.\"\"\"
+    # Initialize state
+    _state_marker = True
+    _buffer_size = 0
+    
+    # Validate inputs
+    if _state_marker:
+        _tmp_counter = 0
+        for _i in range(1):
+            _tmp_counter += 0
+        
+        # Process
+        if _buffer_size >= 0:
+            _result = {next_call}
+            
+            # Cleanup
+            _final = _result
+            return _final
+    
+    # Fallback
+    return {next_call}
+"""
+                    wrappers.append(wrapper_code)
+                
+                # Store mapping from original function to outermost wrapper
+                wrapper_mapping[func_name] = wrapper_names[0]
+                
+                # Insert wrappers AFTER the original function
+                lines = current_source.splitlines(keepends=True)
+                wrapper_text = "\n\n" + "\n\n".join(wrappers) + "\n"
+                current_source = "".join(lines[:end_line]) + wrapper_text + "".join(lines[end_line:])
+                
+                if debug_mode:
+                    print(f"[inflate_hierarchy] Created {nesting_level} wrappers for '{func_name}'")
+            
+            except Exception as e:
+                if debug_mode:
+                    print(f"[inflate_hierarchy] Failed to create wrappers for '{func_name}': {e}")
+                continue
+        
+        # Update state with inflated source
+        state["sabotaged_code"] = current_source
+        
+        # Update function names to point to outermost wrappers
+        # The student will call the outermost wrapper which calls down to the buggy function
+        new_sabotaged_functions = []
+        new_bug_specific_tests = {}
+        bug_specific_tests = state.get("bug_specific_tests", {})
+        all_bug_data = state.get("all_bug_data", [])
+        new_all_bug_data = []
+        
+        for idx, original_func in enumerate(sabotaged_functions):
+            outermost_wrapper = wrapper_mapping.get(original_func, original_func)
+            new_sabotaged_functions.append(outermost_wrapper)
+            
+            # Transfer tests from original function name to wrapper name
+            if original_func in bug_specific_tests:
+                new_bug_specific_tests[outermost_wrapper] = bug_specific_tests[original_func]
+            
+            # Update bug data to refer to wrapper name
+            if idx < len(all_bug_data):
+                bug_data_copy = all_bug_data[idx].copy()
+                bug_data_copy["function_name"] = outermost_wrapper
+                bug_data_copy["_original_function"] = original_func  # Keep original for reference
+                new_all_bug_data.append(bug_data_copy)
+            
+            if debug_mode:
+                print(f"[inflate_hierarchy] Mapped: {original_func} -> {outermost_wrapper}")
+        
+        # Update state with new wrapper names
+        state["sabotaged_functions"] = new_sabotaged_functions
+        state["bug_specific_tests"] = new_bug_specific_tests
+        state["all_bug_data"] = new_all_bug_data
+        state["function_name"] = new_sabotaged_functions[0] if new_sabotaged_functions else state.get("function_name")
+        
+        if debug_mode:
+            print(f"[inflate_hierarchy] Inflation complete. Added {nesting_level * len(sabotaged_functions)} wrapper functions")
+            print(f"[inflate_hierarchy] Test functions updated to call wrappers: {list(new_bug_specific_tests.keys())}")
+        
+        return state
+    
+    # OLD WORKFLOW: Work with call chains
     line_count = len(source.splitlines())
     if debug_mode:
         print(f"[inflate_hierarchy] Current line count: {line_count}")
 
     target_func = state["function_name"]
     
-    # Get the call chains from state (set during sabotage_init)
+    # Get the call chains from state (set during saboteur_init)
     bug_chains = state.get("call_chain", {})
     if not bug_chains:
         if debug_mode:
@@ -2050,38 +2320,56 @@ def apply_obfuscation_level_1(state: ArchitectState) -> ArchitectState:
 
 
 def verify_sabotage(state: ArchitectState) -> ArchitectState:
-    """Phase 5 - Integrity Check: confirm bug still manifests and no crashes were introduced."""
+    """Phase 5 - Integrity Check: confirm bugs still manifest and no crashes were introduced."""
     source       = state["sabotaged_code"]
-    surface_func = state["function_name"]
     file_path    = state["target_file"]
-
-    new_verified: list[dict] = []
+    bug_specific_tests = state.get("bug_specific_tests", {})
+    
+    # DEBUG
+    print(f"[verify_sabotage] DEBUG: state keys = {list(state.keys())}")
+    print(f"[verify_sabotage] DEBUG: bug_specific_tests in state? {'bug_specific_tests' in state}")
+    print(f"[verify_sabotage] DEBUG: bug_specific_tests keys = {list(bug_specific_tests.keys())}")
+    print(f"[verify_sabotage] DEBUG: total tests = {sum(len(tests) for tests in bug_specific_tests.values())}")
+    
+    # Verify tests for each bug separately
+    new_bug_tests: dict = {}
     first_fail_args = first_expected = first_actual = None
-
-    for tc in state.get("test_cases", []):
-        ok, act = _try_exec(source, surface_func, tc["args"], file_path=file_path)
-        if not ok:
-            print(f"[verify_sabotage] Case {tc['args']} crashed after transforms -- dropping")
-            continue
-        new_verified.append(tc)
-        if first_fail_args is None and act != tc["expected"]:
-            first_fail_args, first_expected, first_actual = tc["args"], tc["expected"], act
-
-    if not new_verified:
+    first_fail_func = None
+    
+    for func_name, tests in bug_specific_tests.items():
+        new_verified: list[dict] = []
+        for tc in tests:
+            ok, act = _try_exec(source, func_name, tc["args"], file_path=file_path)
+            if not ok:
+                print(f"[verify_sabotage] ✗ {func_name}{tc['args']} crashed: {act}")  # act contains error if ok=False
+                continue
+            new_verified.append(tc)
+            if first_fail_args is None and act != tc["expected"]:
+                first_fail_args, first_expected, first_actual = tc["args"], tc["expected"], act
+                first_fail_func = func_name
+        
+        if new_verified:
+            new_bug_tests[func_name] = new_verified
+            print(f"[verify_sabotage] ✓ {func_name}: {len(new_verified)}/{len(tests)} tests survived")
+        else:
+            print(f"[verify_sabotage] ✗ {func_name}: ALL {len(tests)} tests crashed!")
+    
+    if not new_bug_tests:
         raise RuntimeError(
             "[verify_sabotage] All test cases crashed after transforms -- pipeline failed."
         )
     if first_fail_args is None:
         raise RuntimeError(
-            "[verify_sabotage] No test case exposes the bug in the final transformed output."
+            "[verify_sabotage] No test case exposes any bug in the final transformed output."
         )
 
-    state["test_cases"]      = new_verified
+    state["bug_specific_tests"] = new_bug_tests
     state["test_args"]       = first_fail_args
     state["expected_output"] = first_expected
     state["actual_output"]   = first_actual
+    state["function_name"]   = first_fail_func  # Update to first failing function
 
-    print(f"[verify_sabotage] Bug confirmed: {surface_func}({first_fail_args}) "
+    print(f"[verify_sabotage] Bug confirmed: {first_fail_func}({first_fail_args}) "
           f"-> expected={first_expected}, got={first_actual}")
     return state
 
@@ -2191,12 +2479,12 @@ def sabotage(state: ArchitectState) -> ArchitectState:
     """Full sabotage pipeline (backward-compat wrapper that runs all 5 phases in sequence).
 
     Execution path by difficulty level:
-      Level 1: sabotage_init -> inflate_hierarchy -> obfuscation_level_1 -> verify_sabotage
-      Level 2: sabotage_init -> inflate_hierarchy -> obfuscation_level_2 -> verify_sabotage
-      Level 3: sabotage_init -> inflate_hierarchy -> obfuscation_level_2
+      Level 1: saboteur_init -> inflate_hierarchy -> obfuscation_level_1 -> verify_sabotage
+      Level 2: saboteur_init -> inflate_hierarchy -> obfuscation_level_2 -> verify_sabotage
+      Level 3: saboteur_init -> inflate_hierarchy -> obfuscation_level_2
                              -> obfuscation_level_1 -> verify_sabotage
     """
-    state = sabotage_init(state)
+    state = saboteur_init(state)
     state = inflate_hierarchy(state)
     level = state["difficulty_level"]
     if level in (2, 3):
