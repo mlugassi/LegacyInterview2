@@ -97,7 +97,8 @@ Your submission is evaluated automatically by an AI reviewer:
 
 ---
 
-# Good luck. The codebase is yours now.
+# Good luck.
+# The codebase is yours now.
 """
     with open(readme_path, "w", encoding="utf-8") as f:
         f.write(content)
