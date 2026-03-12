@@ -101,7 +101,7 @@ def run_tests(workspace_path: str) -> dict:
 
 def run_secret_tests(workspace_path: str) -> dict:
     """Run secret tests (challenge_run_secret.py) — used for final submission scoring."""
-    return _run_test_file(workspace_path, "challenge_run_secret.py")
+    return _run_test_file(workspace_path, ".metadata/challenge_run_secret.py")
 
 
 # ── Function extractor ────────────────────────────────────────────────────────
@@ -163,20 +163,26 @@ def check_fix_location(original_code: str, student_code: str, bug_func_name: str
 _LLM_SYSTEM_PROMPT = """\
 You are an expert code reviewer evaluating a student's fix for a programming challenge.
 
-The student received a Python file with a deliberately injected bug and was asked to fix it
-with MINIMAL changes — ideally 1–3 lines, without renaming variables or restructuring logic.
+The student received a Python file with one or more deliberately injected bugs and was asked
+to fix ALL of them with MINIMAL changes — ideally 1–3 lines per bug, without renaming
+variables or restructuring logic.
 
 You will be given:
-1. For each function the student changed: the buggy version, their fix, and the expected fix.
+1. Every bug function: the buggy version, the student's version, and the expected fix.
+   Functions marked "NOT FIXED" were not touched by the student at all.
 2. Test results BEFORE the student's change (run on the buggy code).
 3. Test results AFTER the student's change (run on their submitted code).
 
 Evaluate the submission on these criteria:
-- Correctness  (0–50 pts): Do the tests pass after the fix? Is the logic correct?
+- Correctness  (0–50 pts): Do the tests pass after the fix? Is ALL the logic correct?
+  Deduct heavily if the student left any bug unfixed (marked "NOT FIXED").
 - Minimality   (0–30 pts): Did the student change only what was necessary?
   A fix that changes exactly the right token(s) scores 30. Extra rewrites lose points.
 - Quality      (0–20 pts): Does the fix match the expected solution in intent and style?
   A fix that perfectly matches the expected approach scores 20.
+
+If any bug function is marked "NOT FIXED", the Correctness score must be significantly
+reduced (by at least 20 pts per unfixed bug) regardless of test results.
 
 Respond ONLY with a valid JSON object — no markdown, no extra text:
 {"score": <integer 0-100>, "explanation": "<2-4 sentence explanation>"}
@@ -202,10 +208,16 @@ def llm_score_submission(
     # Build the function-by-function section
     func_sections = []
     for i, f in enumerate(changed_funcs, 1):
+        if f.get("unfixed"):
+            header = f"### Function {i}: `{f['name']}` — ⚠️ NOT FIXED BY STUDENT"
+            student_label = "**Student's version (unchanged — bug still present):**"
+        else:
+            header = f"### Function {i}: `{f['name']}`"
+            student_label = "**Student's fix:**"
         func_sections.append(
-            f"### Function {i}: `{f['name']}`\n\n"
+            f"{header}\n\n"
             f"**Buggy version (received by student):**\n```python\n{f['buggy']}\n```\n\n"
-            f"**Student's fix:**\n```python\n{f['student']}\n```\n\n"
+            f"{student_label}\n```python\n{f['student']}\n```\n\n"
             f"**Expected correct version:**\n```python\n{f['expected']}\n```"
         )
 
@@ -309,6 +321,7 @@ def evaluate_submission(
     hints_used: int,
     sabotaged_code: str = "",
     target_file: str = "",
+    bug_func_names: list | None = None,
 ) -> dict:
     """
     Full evaluation of a student submission.
@@ -356,6 +369,24 @@ def evaluate_submission(
                 "student":  stu_funcs[name],
                 "expected": orig_funcs.get(name, "(not found in original)"),
             })
+
+    # For every expected bug function the student did NOT change, add it as
+    # "unfixed" so the LLM sees the full picture and penalises accordingly.
+    all_bug_names = bug_func_names or ([bug_func_name] if bug_func_name else [])
+    changed_names = {f["name"] for f in changed_funcs}
+    for fn in all_bug_names:
+        if fn and fn not in changed_names:
+            buggy_ver    = ref_funcs.get(fn, "")
+            student_ver  = stu_funcs.get(fn, buggy_ver)
+            expected_ver = orig_funcs.get(fn, "")
+            if buggy_ver:
+                changed_funcs.append({
+                    "name":    fn,
+                    "buggy":   buggy_ver,
+                    "student": student_ver,
+                    "expected": expected_ver or "(not found in original)",
+                    "unfixed": True,
+                })
 
     # Collect per-test results for the "after" state (offset secret test numbers)
     offset = public_result["total"]

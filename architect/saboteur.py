@@ -1590,6 +1590,9 @@ def sabotage_init(state: ArchitectState) -> ArchitectState:
             state["bug_func_name"]          = all_data[0]["_debug_func_name"]   if all_data else ""
             state["bug_func_source"]        = all_data[0]["_debug_sabot_func"]  if all_data else ""
             state["original_bug_func_source"] = all_data[0]["_debug_func_source"] if all_data else ""
+            state["bug_func_names"]              = [d["_debug_func_name"]             for d in all_data]
+            state["bug_func_sources_list"]       = [d.get("_debug_sabot_func",  "")   for d in all_data]
+            state["original_bug_func_sources_list"] = [d.get("_debug_func_source", "") for d in all_data]
             
             # Store the call chain for debugging and documentation
             # Format: {bug_function_name: [surface_func, ..., bug_func]}

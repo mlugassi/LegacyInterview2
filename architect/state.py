@@ -25,3 +25,6 @@ class ArchitectState(TypedDict):
     bug_func_name: str     # internal: name of the sabotaged helper function (passed between nodes)
     bug_func_source: str   # internal: exact buggy source of the helper (passed between nodes)
     call_chain: dict       # internal: dict of bug_func_name -> [surface_func, ..., bug_func] call chains
+    bug_func_names: list                  # all sabotaged helper names (one per injected bug)
+    bug_func_sources_list: list           # all sabotaged helper sources (one per injected bug)
+    original_bug_func_sources_list: list  # all original helper sources (one per injected bug)

@@ -57,6 +57,9 @@ def node_run_bug_generator(state: OrchestratorState) -> OrchestratorState:
         "bug_func_source": result.get("bug_func_source", ""),
         "test_cases":     result.get("test_cases", []),
         "bug_description": result.get("bug_description", ""),
+        "bug_func_names":              result.get("bug_func_names", []),
+        "bug_func_sources_list":       result.get("bug_func_sources_list", []),
+        "original_bug_func_sources_list": result.get("original_bug_func_sources_list", []),
     }
 
 
@@ -82,6 +85,9 @@ def node_save_challenge_state(state: OrchestratorState) -> OrchestratorState:
         "test_cases":       state["test_cases"],
         "difficulty_level": state["difficulty_level"],
         "bug_description":  state["bug_description"],
+        "bug_func_names":              state.get("bug_func_names", []),
+        "bug_func_sources_list":       state.get("bug_func_sources_list", []),
+        "original_bug_func_sources_list": state.get("original_bug_func_sources_list", []),
     }
 
     state_path = workspace / "challenge_state.json"
