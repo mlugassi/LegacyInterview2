@@ -457,8 +457,39 @@ def _workspace_diff_html(cs: "ChallengeState") -> str:
     return "".join(sections)
 
 
-def _diff_html(a: str, b: str, from_label: str, to_label: str) -> str:
+def _strip_comments_and_docstrings(code: str) -> str:
+    """Remove comment-only lines and docstrings, keeping pure code."""
+    import ast as _ast
+    docstring_lines: set[int] = set()
+    try:
+        tree = _ast.parse(code)
+        for node in _ast.walk(tree):
+            if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef,
+                                  _ast.ClassDef, _ast.Module)):
+                if (node.body
+                        and isinstance(node.body[0], _ast.Expr)
+                        and isinstance(node.body[0].value, _ast.Constant)
+                        and isinstance(node.body[0].value.value, str)):
+                    ds = node.body[0]
+                    docstring_lines.update(range(ds.lineno, ds.end_lineno + 1))
+    except Exception:
+        pass
+    result = []
+    for i, line in enumerate(code.splitlines(), 1):
+        if i in docstring_lines:
+            continue
+        if line.lstrip().startswith("#"):
+            continue
+        result.append(line)
+    return "\n".join(result)
+
+
+def _diff_html(a: str, b: str, from_label: str, to_label: str,
+               strip_comments: bool = False) -> str:
     """Generate coloured unified-diff HTML between two code strings."""
+    if strip_comments:
+        a = _strip_comments_and_docstrings(a)
+        b = _strip_comments_and_docstrings(b)
     a = _normalize(a)
     b = _normalize(b)
     a_lines = a.splitlines(keepends=True)
@@ -675,12 +706,14 @@ def _expected_fix_diff_html(cs: "ChallengeState", submitted_code: str = "") -> s
         if approx != received_code:
             expected_fixed = approx
         else:
-            return _diff_html(received_code, cs.original_code, target_rel, target_rel)
+            return _diff_html(received_code, cs.original_code, target_rel, target_rel,
+                              strip_comments=True)
 
     # ── Section 1: expected fix ───────────────────────────────────────────────
     section1 = (
         "<h4 style='color:#94a3b8;margin:8px 0 4px;'>🎯 Expected fix</h4>"
-        + _diff_html(received_code, expected_fixed, target_rel, target_rel)
+        + _diff_html(received_code, expected_fixed, target_rel, target_rel,
+                     strip_comments=True)
     )
 
     if not submitted_code:
