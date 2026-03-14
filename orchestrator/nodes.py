@@ -40,6 +40,10 @@ def node_run_bug_generator(state: OrchestratorState) -> OrchestratorState:
         "candidate_files":  [],
         "bug_func_name":    "",
         "bug_func_source":  "",
+        "bug_func_names":   [],
+        "bug_func_sources_list": [],
+        "original_bug_func_sources_list": [],
+        "original_bug_func_source": "",
     }
 
     result = architect_graph.invoke(initial_arch_state)

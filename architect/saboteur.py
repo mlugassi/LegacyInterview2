@@ -2068,6 +2068,17 @@ def saboteur_init(state: ArchitectState) -> ArchitectState:
         state["bug_func_name"] = all_bugs_data[0].get("_debug_func_name", successful_funcs[0] if successful_funcs else "unknown")
         state["bug_func_source"] = all_bugs_data[0].get("_debug_sabot_func", "")
         state["original_bug_func_source"] = all_bugs_data[0].get("_debug_func_source", "")
+
+    # Build per-bug lists used by the "Changes & Expected" tab
+    state["bug_func_names"] = [
+        b.get("_debug_func_name", "") for b in all_bugs_data
+    ]
+    state["bug_func_sources_list"] = [
+        b.get("_debug_sabot_func", "") for b in all_bugs_data
+    ]
+    state["original_bug_func_sources_list"] = [
+        b.get("_debug_func_source", "") for b in all_bugs_data
+    ]
     
     if debug_mode:
         total_tests = sum(len(tests) for tests in bug_specific_tests.values())

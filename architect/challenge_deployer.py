@@ -70,16 +70,19 @@ def deploy_challenge(state: ArchitectState) -> ArchitectState:
             case_lines = []
             for tc in tests:
                 args_repr = tc.get("args", "()")
-                exp_value = tc.get("expected") or tc.get("correct_output")
-                if not exp_value:
-                    exp_value = "None"
-                
-                # Validate that exp_value is a valid Python literal
-                try:
-                    eval(exp_value, {"__builtins__": {}})
-                    exp_repr = exp_value
-                except:
-                    exp_repr = repr(str(exp_value))
+                exp_value = tc.get("expected") if "expected" in tc else tc.get("correct_output")
+                if exp_value is None:
+                    exp_repr = "None"
+                elif isinstance(exp_value, str):
+                    # Already a string — validate it's a valid Python literal
+                    try:
+                        eval(exp_value, {"__builtins__": {}})
+                        exp_repr = exp_value
+                    except Exception:
+                        exp_repr = repr(exp_value)
+                else:
+                    # Already a Python object (int, list, tuple, bool…)
+                    exp_repr = repr(exp_value)
                 
                 # Handle tuple formatting
                 args_str = args_repr.strip()

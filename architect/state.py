@@ -29,3 +29,8 @@ class ArchitectState(TypedDict):
     bug_specific_tests: dict  # dict of {function_name: [test cases]} for each bug
     all_bug_data: list        # list of bug metadata dicts (one per bug)
     sabotaged_functions: list  # list of function names that have bugs
+    # Per-bug source snapshots (for "Changes & Expected" tab)
+    bug_func_names: list               # [func_name, ...] one per bug
+    bug_func_sources_list: list        # [sabotaged_source, ...] one per bug
+    original_bug_func_sources_list: list  # [original_source, ...] one per bug
+    original_bug_func_source: str      # original source of first buggy function (legacy)
