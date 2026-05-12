@@ -16,10 +16,13 @@ elif os.path.exists(_env_fallback):
 else:
     load_dotenv()
 
-# ── Intel proxy (uncomment if needed on corporate network) ──
-# os.environ["http_proxy"]  = "http://proxy-iil.intel.com:912"
-# os.environ["https_proxy"] = "http://proxy-iil.intel.com:912"
-# os.environ["no_proxy"]    = "localhost,127.0.0.1"
+# ── Apply proxy settings from .env if defined ──
+if os.getenv("http_proxy"):
+    os.environ["http_proxy"] = os.getenv("http_proxy")
+if os.getenv("https_proxy"):
+    os.environ["https_proxy"] = os.getenv("https_proxy")
+if os.getenv("no_proxy"):
+    os.environ["no_proxy"] = os.getenv("no_proxy")
 
 if not os.getenv("OPENAI_API_KEY"):
     print("ERROR: OPENAI_API_KEY not set. Add it to .env or export it.")

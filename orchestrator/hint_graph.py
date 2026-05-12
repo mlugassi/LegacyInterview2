@@ -314,7 +314,7 @@ At the very end of your response, write the following lines (each on its own lin
      HINT_SUMMARY: <one short sentence (max 120 chars) summarising what aspect of the bug you hinted at>
    Do NOT write HINT_SUMMARY if GAVE_HINT:NO.{_confirmed_hint_instruction}"""
 
-    llm = ChatOpenAI(model="gpt-4o", temperature=0.7)
+    llm = ChatOpenAI(model="gpt-4o", temperature=0.7, request_timeout=60)
 
     # Reconstruct the conversation for the LLM
     lc_messages: list = [SystemMessage(content=system_prompt)]

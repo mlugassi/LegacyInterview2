@@ -93,33 +93,88 @@ You will receive:
 
 Your task: Inject ONE simple, logical bug so that AT LEAST HALF of the tests will produce DIFFERENT outputs.
 
+🚨 ABSOLUTELY CRITICAL - NO EXCEPTIONS ALLOWED:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+The buggy function MUST run without throwing ANY exceptions!
+- NO IndexError, NO KeyError, NO TypeError, NO AttributeError
+- NO ValueError, NO ZeroDivisionError, NO NameError, NO RecursionError
+- The function must execute COMPLETELY and return a value (even if wrong)
+- If your bug causes ANY test to crash/throw exception = AUTOMATIC FAILURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⚠️ BEFORE YOU WRITE ANY CODE - MANDATORY MENTAL CHECKLIST:
+1. Look at ALL test inputs - identify edge cases (empty strings, [], 0, None, etc.)
+2. For EACH test input, trace your planned bug step-by-step mentally
+3. Ask: "Could this bug cause an IndexError?" → If yes, choose different bug
+4. Ask: "Could this bug cause RecursionError?" → If yes, choose different bug  
+5. Ask: "Will this bug change the output for at least 50% of tests?" → If no, make bug stronger
+6. ONLY after passing ALL checks above → write the code
+
+REAL-WORLD EXAMPLES OF BUGS THAT WERE REJECTED:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Example 1: camelize(string) function
+❌ REJECTED BUG: Changed string[1:] to string[0:1] + string[2:]
+   WHY REJECTED: Test case ('', False) caused IndexError: string index out of range
+   ROOT CAUSE: Did not check edge case of empty string before slicing
+   
+Example 2: camelize(string, uppercase_first_letter) function  
+❌ REJECTED BUG: Changed camelize(string) to camelize(string, False) in recursive call
+   WHY REJECTED: Caused infinite recursion → RecursionError on all inputs
+   ROOT CAUSE: Created recursive loop without base case change
+   
+Example 3: process_list(lst) function
+❌ REJECTED BUG: Changed lst[:-1] to lst[1:]
+   WHY REJECTED: Empty list caused no crash, but test with len=1 returned []
+   ✅ BETTER BUG: Change loop range(len(lst)) to range(len(lst)-1)
+   WHY BETTER: Returns shorter list without any indexing that could crash
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+EXAMPLES OF BUGS THAT WILL FAIL (NEVER DO THESE):
+❌ lst[i+1] when i can be last index (IndexError!)
+❌ dict[key] when key might not exist (KeyError!)  
+❌ result / count when count might be 0 (ZeroDivisionError!)
+❌ str.split()[5] when list might be shorter (IndexError!)
+❌ int(value) when value might not be numeric (ValueError!)
+❌ string[2:] when string might have length < 2 (IndexError!)
+❌ Changing recursive parameters without checking base case (RecursionError!)
+
+EXAMPLES OF SAFE BUGS (ALWAYS DO THESE):
+✅ range(len(lst)) → range(len(lst)-1)  (returns shorter list, no crash)
+✅ if x < 10: → if x <= 10:  (different condition, no crash)
+✅ result + 1 → result + 2  (wrong value, no crash)
+✅ count = 0 → count = 1  (wrong initial value, no crash)
+✅ string[:1].upper() → string[:1].lower()  (wrong case, works even on empty string)
+✅ return lst[-1:] → return lst[-2:]  (safe slicing, returns empty list if too short)
+
 CRITICAL REQUIREMENT:
 - You MUST mentally trace through EACH test case on both the original and buggy versions
 - If a test shows the SAME output on both versions, the bug is TOO SUBTLE or in the WRONG place
+- If a test CRASHES on the buggy version, the bug is TOO AGGRESSIVE
 
-******MANDATORY*****: Verify that at least 50% of tests will show DIFFERENT outputs
+******MANDATORY*****: Verify that at least 50% of tests will show DIFFERENT outputs (NOT crashes!)
 
 BEST BUG TYPES - Choose SIMPLE logical errors (choose ONE that WILL affect the test outputs you see):
 1. Off-by-one errors: range(len(lst)) → range(len(lst)-1), or i+1 → i
 2. Wrong comparison operator: < → <=, > → >=, == → !=
-3. Wrong arithmetic operator: + → -, * → /, // → /
+3. Wrong arithmetic operator: + → -, * → /, // → / (but check for division by zero!)
 4. Wrong boolean operator: and → or, not → (remove not)
 5. Wrong initialization value: count = 0 → count = 1, result = [] → result = [0]
 6. Wrong variable name: use wrong variable in expression
-7. Wrong return statement: return final list with last/first element modified
+7. Wrong return statement: return final list with last/first element modified (if list is never empty)
 
 AVOID THESE (too complex or obscure):
 - Bitwise operations (unless the function already uses them)
 - Complex string manipulations that look intentional
 - Type conversions that seem unnatural
 - Lambda expressions or comprehensions changes (unless simple)
+- ANY changes that could cause exceptions!
 
 EXAMPLE - GOOD BUG SELECTION:
 Test 1: input [1,2,3,4], output [2,3,4,5]  
 Test 2: input [10,20,30], output [20,30,40]
 → Change `x + 1` to `x + 2` 
-→ Test 1 will now output [3,4,5,6] ✓ DIFFERENT
-→ Test 2 will now output [30,40,50] ✓ DIFFERENT
+→ Test 1 will now output [3,4,5,6] ✓ DIFFERENT, no crash
+→ Test 2 will now output [30,40,50] ✓ DIFFERENT, no crash
 
 CRITICAL RULES:
 - Choose a SIMPLE, LOGICAL error that a human might make
@@ -130,6 +185,7 @@ CRITICAL RULES:
 - Function must still RUN without exceptions on all test inputs
 - At least HALF of the provided tests must produce DIFFERENT outputs
 - Bug should be the kind that could happen during normal coding
+- VERIFY: No IndexError, KeyError, TypeError, or any other exception possible!
 
 Return ONLY valid JSON (no markdown):
 {
@@ -942,9 +998,9 @@ def _sabotage_one_helper(
     # =====================================================================
     attempted_bugs: list[str] = []
     
-    for attempt in range(1, 4):
+    for attempt in range(1, 6):  # Increased to 5 attempts to handle rejected bugs
         if debug_mode:
-            print(f"[saboteur] PHASE 2: Bug injection attempt {attempt}/3...")
+            print(f"[saboteur] PHASE 2: Bug injection attempt {attempt}/5...")
         
         # Inject bug - GPT sees tests to make bug detectable
         buggy_func_dict = _inject_bug_into_function(
@@ -997,10 +1053,10 @@ def _sabotage_one_helper(
             continue
         
         # =====================================================================
-        # PHASE 3: VALIDATE BUG IS DETECTABLE
+        # PHASE 3: VALIDATE BUG IS DETECTABLE AND DOESN'T CRASH
         # =====================================================================
         if debug_mode:
-            print(f"[saboteur] PHASE 3: Testing if bug is detectable...")
+            print(f"[saboteur] PHASE 3: Testing if bug is detectable and safe...")
         
         buggy_results = _execute_tests_on_source(
             candidate_source,
@@ -1009,6 +1065,24 @@ def _sabotage_one_helper(
             file_path=file_path,
             debug_mode=debug_mode
         )
+        
+        # CRITICAL: Check if any tests crashed (exceptions)
+        crashed_tests = []
+        for test_args_str in original_results:
+            if test_args_str not in buggy_results:
+                crashed_tests.append(test_args_str)
+                continue
+            
+            buggy_success, buggy_result = buggy_results[test_args_str]
+            if not buggy_success:
+                crashed_tests.append(test_args_str)
+        
+        if crashed_tests:
+            if debug_mode:
+                print(f"[saboteur] REJECT: Bug causes {len(crashed_tests)} tests to CRASH!")
+                for args in crashed_tests[:3]:  # Show first 3
+                    print(f"[saboteur]   Crashed: {args}")
+            continue  # Try another bug
         
         # Count tests that detect the bug (different result)
         detecting_tests = []
@@ -1060,7 +1134,7 @@ def _sabotage_one_helper(
                 print(f"[saboteur] REJECT: Bug not detected by any tests")
     
     if debug_mode:
-        print(f"[saboteur] All 3 attempts exhausted — no suitable bug found")
+        print(f"[saboteur] All 5 attempts exhausted — no suitable bug found")
     return None, None
 
 
@@ -1886,7 +1960,7 @@ def saboteur_init(state: ArchitectState) -> ArchitectState:
         print(f"[saboteur_init] Trying {len(candidate_files)} candidate files in random order")
     
     # Initialize data structures for collecting bugs across all files
-    llm = ChatOpenAI(model="gpt-4o", temperature=0.7)
+    llm = ChatOpenAI(model="gpt-4o", temperature=0.3, request_timeout=60)
     all_bugs_data = []
     bug_specific_tests = {}  # {func_name: [test cases that detect this bug]}
     successful_funcs = []  # Track which functions actually got bugs
@@ -2584,7 +2658,7 @@ def inflate_hierarchy(state: ArchitectState) -> ArchitectState:
         f"FUNCTIONS TO INFLATE:\n{chain_source}"
     )
 
-    llm = ChatOpenAI(model="gpt-4o", temperature=0.7)
+    llm = ChatOpenAI(model="gpt-4o", temperature=0.3, request_timeout=60)
     try:
         response = llm.invoke([HumanMessage(content=prompt)])
         snippet = _strip_markdown_code(response.content)

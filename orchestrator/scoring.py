@@ -249,7 +249,7 @@ def llm_score_submission(
     )
 
     try:
-        llm = ChatOpenAI(model="gpt-4o", temperature=0)
+        llm = ChatOpenAI(model="gpt-4o", temperature=0, request_timeout=60)
         response = llm.invoke([
             SystemMessage(content=_LLM_SYSTEM_PROMPT),
             HumanMessage(content=human_text),
