@@ -30,7 +30,10 @@ class ArchitectState(TypedDict):
     all_bug_data: list        # list of bug metadata dicts (one per bug)
     sabotaged_functions: list  # list of function names that have bugs
     # Per-bug source snapshots (for "Changes & Expected" tab)
-    bug_func_names: list               # [func_name, ...] one per bug
-    bug_func_sources_list: list        # [sabotaged_source, ...] one per bug
-    original_bug_func_sources_list: list  # [original_source, ...] one per bug
+    bug_func_names: list               # [func_name, ...] one per bug (POST-INFLATE)
+    bug_func_sources_list: list        # [sabotaged_source, ...] one per bug (POST-INFLATE)
+    original_bug_func_sources_list: list  # [original_source, ...] one per bug (POST-INFLATE)
     original_bug_func_source: str      # original source of first buggy function (legacy)
+    # PRE-INFLATE versions (for debugging/reference - optional)
+    pre_inflate_bug_sources: list      # [sabotaged_source, ...] before wrapper inflation
+    pre_inflate_original_sources: list # [original_source, ...] before wrapper inflation

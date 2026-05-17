@@ -2548,9 +2548,57 @@ def inflate_hierarchy(state: ArchitectState) -> ArchitectState:
         state["all_bug_data"] = new_all_bug_data
         state["function_name"] = new_sabotaged_functions[0] if new_sabotaged_functions else state.get("function_name")
         
+        # CRITICAL FIX: Extract actual function sources AFTER inflate for comparison system
+        # The comparison system needs POST-INFLATE sources to work correctly
+        new_bug_func_names = []
+        new_bug_func_sources_list = []
+        new_original_bug_func_sources_list = []
+        
+        # Also save PRE-INFLATE versions for reference
+        pre_inflate_bug_sources = state.get("bug_func_sources_list", [])
+        pre_inflate_original_sources = state.get("original_bug_func_sources_list", [])
+        
+        for idx, original_func in enumerate(sabotaged_functions):
+            # The buggy function is still the ORIGINAL function (not the wrapper)
+            # The wrapper just calls it, so we extract the original function's source
+            new_bug_func_names.append(original_func)
+            
+            # Extract POST-INFLATE buggy function source from current_source
+            try:
+                buggy_func_post_inflate, _, _ = _extract_function_source(current_source, original_func)
+                new_bug_func_sources_list.append(buggy_func_post_inflate)
+            except:
+                # Fallback to pre-inflate if extraction fails
+                if idx < len(pre_inflate_bug_sources):
+                    new_bug_func_sources_list.append(pre_inflate_bug_sources[idx])
+                else:
+                    new_bug_func_sources_list.append("")
+            
+            # Extract POST-INFLATE clean function source from original code
+            try:
+                original_code = state.get("original_code", "")
+                orig_func_source, _, _ = _extract_function_source(original_code, original_func)
+                new_original_bug_func_sources_list.append(orig_func_source)
+            except:
+                # Fallback to pre-inflate if extraction fails
+                if idx < len(pre_inflate_original_sources):
+                    new_original_bug_func_sources_list.append(pre_inflate_original_sources[idx])
+                else:
+                    new_original_bug_func_sources_list.append("")
+        
+        # Update state with POST-INFLATE sources for comparison system
+        state["bug_func_names"] = new_bug_func_names
+        state["bug_func_sources_list"] = new_bug_func_sources_list
+        state["original_bug_func_sources_list"] = new_original_bug_func_sources_list
+        
+        # Save PRE-INFLATE versions for debugging/reference
+        state["pre_inflate_bug_sources"] = pre_inflate_bug_sources
+        state["pre_inflate_original_sources"] = pre_inflate_original_sources
+        
         if debug_mode:
             print(f"[inflate_hierarchy] Inflation complete. Added {nesting_level * len(sabotaged_functions)} wrapper functions")
             print(f"[inflate_hierarchy] Test functions updated to call wrappers: {list(new_bug_specific_tests.keys())}")
+            print(f"[inflate_hierarchy] Updated bug_func_sources_list with POST-INFLATE sources for {len(new_bug_func_names)} functions")
         
         return state
     

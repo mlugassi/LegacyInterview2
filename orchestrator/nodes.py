@@ -89,9 +89,16 @@ def node_save_challenge_state(state: OrchestratorState) -> OrchestratorState:
         "test_cases":       state["test_cases"],
         "difficulty_level": state["difficulty_level"],
         "bug_description":  state["bug_description"],
+        # POST-INFLATE versions (used by comparison system)
         "bug_func_names":              state.get("bug_func_names", []),
         "bug_func_sources_list":       state.get("bug_func_sources_list", []),
         "original_bug_func_sources_list": state.get("original_bug_func_sources_list", []),
+        # PRE-INFLATE versions (for debugging/reference)
+        "pre_inflate_bug_sources":     state.get("pre_inflate_bug_sources", []),
+        "pre_inflate_original_sources": state.get("pre_inflate_original_sources", []),
+        "nesting_level":               state.get("nesting_level", 3),
+        "refactoring_enabled":         state.get("refactoring_enabled", False),
+        "debug_mode":                  state.get("debug_mode", False),
     }
 
     state_path = workspace / "challenge_state.json"

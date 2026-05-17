@@ -61,12 +61,24 @@ class ChallengeState:
         snapshot_dir = self.workspace / ".metadata"
         snap_files: dict[str, str] = {}
         if snapshot_dir.exists():
-            for snap_path in snapshot_dir.iterdir():
-                if snap_path.is_file() and snap_path.name != "challenge_run_secret.py":
-                    # filename encodes the relative path: separators replaced by __
-                    rel_posix = snap_path.name.replace("__", "/")
+            # Get the target file path from the data for proper mapping
+            target_rel_from_json = data.get("target_file", "")
+            if target_rel_from_json:
+                try:
+                    # Convert to workspace-relative posix path
+                    target_abs = Path(target_rel_from_json).resolve()
+                    target_rel = target_abs.relative_to(self.workspace.resolve()).as_posix()
+                except (ValueError, OSError):
+                    target_rel = Path(target_rel_from_json).as_posix()
+                
+                # Find the corresponding snapshot file
+                # The snapshot filename has separators replaced with __
+                expected_snapshot_name = target_rel.replace("/", "__")
+                snapshot_path = snapshot_dir / expected_snapshot_name
+                
+                if snapshot_path.exists():
                     try:
-                        snap_files[rel_posix] = snap_path.read_text(encoding="utf-8")
+                        snap_files[target_rel] = snapshot_path.read_text(encoding="utf-8")
                     except Exception:
                         pass
 
@@ -627,6 +639,10 @@ def _compute_expected_fixed_code(cs: "ChallengeState") -> str | None:
     surgical fixes for every injected bug.  Supports num_bugs > 1 by
     iterating over all (func_name, orig_pre, sabot_pre) triples stored in
     challenge_state.json.
+    
+    IMPORTANT: After inflate_hierarchy, the sources are POST-INFLATE (include wrappers).
+    This ensures surgical patching works correctly even when wrapper layers exist.
+    
     Returns None if no fix could be determined.
     """
     import json as _json
@@ -638,6 +654,7 @@ def _compute_expected_fixed_code(cs: "ChallengeState") -> str | None:
 
     # Multi-bug lists (written by the new pipeline). Fall back to single-bug
     # fields for workspaces generated before this change.
+    # NOTE: These are POST-INFLATE sources (updated by inflate_hierarchy)
     bug_func_names      = _data.get("bug_func_names") or cs.bug_func_names
     sabot_sources_list  = _data.get("bug_func_sources_list") or []
     orig_sources_list   = _data.get("original_bug_func_sources_list") or []
@@ -1014,7 +1031,22 @@ def create_full_interface() -> gr.Blocks:
       Page 3: Results (shown after Submit)
     """
 
-    with gr.Blocks(title="Legacy Code Challenge") as demo:
+    css = """
+    #code-editor {
+        font-size: 14px !important;
+        font-family: 'Consolas', 'Monaco', 'Courier New', monospace !important;
+        background-color: #1e1e1e !important;
+        border-radius: 8px !important;
+    }
+    #code-editor .codemirror-wrapper {
+        background-color: #1e1e1e !important;
+    }
+    #code-editor .cm-editor {
+        background-color: #1e1e1e !important;
+    }
+    """
+
+    with gr.Blocks(title="Legacy Code Challenge", css=css) as demo:
 
         # Shared state
         workspace_state           = gr.State("")
@@ -1109,6 +1141,7 @@ def create_full_interface() -> gr.Blocks:
                                 interactive=True,
                                 lines=30,
                                 elem_id="code-editor",
+                                show_label=False,
                             )
 
                         with gr.Tab("🧪 Test Results", id=2):
@@ -1237,12 +1270,15 @@ def create_full_interface() -> gr.Blocks:
             cs.write_target(code)
             return "✅ Saved"
 
-        def on_run_tests(workspace_path):
+        def on_run_tests(code, workspace_path):
             loading = '<p style="text-align:center;padding:20px;color:#888;">⏳ Running tests…</p>'
             yield (gr.update(selected=2), loading)
             if not workspace_path:
                 yield (gr.update(selected=2), "<p style='color:#888'>No challenge loaded.</p>")
                 return
+            # Auto-save before running tests
+            cs_temp = ChallengeState(workspace_path)
+            cs_temp.write_target(code)
             try:
                 from orchestrator.scoring import run_tests
                 r   = run_tests(workspace_path)
@@ -1251,11 +1287,14 @@ def create_full_interface() -> gr.Blocks:
             except Exception as exc:
                 yield (gr.update(selected=2), f"<p style='color:#ef4444;font-family:monospace;'>❌ Error: {exc}</p>")
 
-        def on_show_changes(workspace_path):
+        def on_show_changes(code, workspace_path):
             if not workspace_path:
                 diff = "<p style='color:#888'>No challenge loaded.</p>"
             else:
-                cs   = ChallengeState(workspace_path)
+                # Save code from editor, then read from disk for comparison
+                # (Gradio code_editor doesn't always pass updated content reliably)
+                cs = ChallengeState(workspace_path)
+                cs.write_target(code)
                 diff = _workspace_diff_html(cs)
             return (gr.update(selected=3), diff)
 
@@ -1354,11 +1393,11 @@ def create_full_interface() -> gr.Blocks:
         )
         save_btn.click(on_save, inputs=[code_editor, workspace_state], outputs=[save_status])
 
-        btn_tests.click(on_run_tests, inputs=[workspace_state], outputs=[left_tabs, test_output])
-        run_tests_tab_btn.click(on_run_tests, inputs=[workspace_state], outputs=[left_tabs, test_output])
+        btn_tests.click(on_run_tests, inputs=[code_editor, workspace_state], outputs=[left_tabs, test_output])
+        run_tests_tab_btn.click(on_run_tests, inputs=[code_editor, workspace_state], outputs=[left_tabs, test_output])
 
-        btn_changes.click(on_show_changes, inputs=[workspace_state], outputs=[left_tabs, changes_diff_html])
-        refresh_btn.click(on_show_changes, inputs=[workspace_state], outputs=[left_tabs, changes_diff_html])
+        btn_changes.click(on_show_changes, inputs=[code_editor, workspace_state], outputs=[left_tabs, changes_diff_html])
+        refresh_btn.click(on_show_changes, inputs=[code_editor, workspace_state], outputs=[left_tabs, changes_diff_html])
 
         revert_btn.click(on_revert, inputs=[workspace_state], outputs=[code_editor, left_tabs])
 
@@ -1402,7 +1441,22 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
 
     name_suffix = f" &nbsp;|&nbsp; {student_name.strip()}" if student_name.strip() else ""
 
-    with gr.Blocks(title="Legacy Code Challenge", js=_make_js(timer_minutes)) as demo:
+    css = """
+    #code-editor {
+        font-size: 14px !important;
+        font-family: 'Consolas', 'Monaco', 'Courier New', monospace !important;
+        background-color: #1e1e1e !important;
+        border-radius: 8px !important;
+    }
+    #code-editor .codemirror-wrapper {
+        background-color: #1e1e1e !important;
+    }
+    #code-editor .cm-editor {
+        background-color: #1e1e1e !important;
+    }
+    """
+
+    with gr.Blocks(title="Legacy Code Challenge", css=css, js=_make_js(timer_minutes)) as demo:
 
         hints_used_state          = gr.State(0)
         submission_count_state    = gr.State(0)
@@ -1438,6 +1492,7 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
                             code_editor = gr.Code(
                                 value=cs.read_target(), language="python", label=cs.target_file,
                                 interactive=True, lines=30, elem_id="code-editor",
+                                show_label=False,
                             )
 
                         with gr.Tab("🧪 Test Results", id=2):
@@ -1494,9 +1549,11 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
             cs.write_target(code)
             return "✅ Saved"
 
-        def on_run_tests():
+        def on_run_tests(code):
             loading = '<p style="text-align:center;padding:20px;color:#888;">⏳ Running tests…</p>'
             yield (gr.update(selected=2), loading)
+            # Auto-save before running tests
+            cs.write_target(code)
             try:
                 from orchestrator.scoring import run_tests
                 r   = run_tests(workspace_path)
@@ -1506,7 +1563,9 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
                 yield (gr.update(selected=2), f"<p style='color:#ef4444;font-family:monospace;'>❌ Error: {exc}</p>")
 
         def on_show_changes():
-            return (gr.update(selected=3), _workspace_diff_html(cs))
+            # Read directly from disk (Gradio code_editor doesn't update its value reliably)
+            diff = _workspace_diff_html(cs)
+            return (gr.update(selected=3), diff)
 
         def on_revert():
             cs.reset_target()
@@ -1582,8 +1641,8 @@ def create_interface(workspace_path: str, student_name: str = "", timer_minutes:
         file_dropdown.change(on_file_select, inputs=[file_dropdown], outputs=[code_editor])
         save_btn.click(on_save, inputs=[code_editor], outputs=[save_status])
 
-        btn_tests.click(on_run_tests, outputs=[left_tabs, test_output])
-        run_tests_tab_btn.click(on_run_tests, outputs=[left_tabs, test_output])
+        btn_tests.click(on_run_tests, inputs=[code_editor], outputs=[left_tabs, test_output])
+        run_tests_tab_btn.click(on_run_tests, inputs=[code_editor], outputs=[left_tabs, test_output])
 
         btn_changes.click(on_show_changes, outputs=[left_tabs, changes_diff_html])
         refresh_btn.click(on_show_changes, outputs=[left_tabs, changes_diff_html])
